@@ -34,8 +34,9 @@ class LinearRegression:
             raise MalformedModel("Y_train must be of shape of (X_train[0], 1)")
         
         #initilize the model params with uniform distribution in [0,1]
-        self.model = np.reshape(np.zeros(self.num_features + 1), \
-                                    (self.num_features + 1, 1))
+        self.model = np.reshape(np.random.rand(self.num_features + 1), (self.num_features + 1, 1))
+        # set the bais model weight to 1
+        self.model[self.num_features][0] = 1
         
         train_algo = self.__batch_train if not sgd else self.__stochastic_train
         
