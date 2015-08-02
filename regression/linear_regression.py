@@ -31,11 +31,11 @@ class LinearRegression:
         self.num_outputs, = self.Y_train.shape
         
         if self.num_outputs != self.num_samples:
-            raise MalformedModel("Y_train must be of shape of (X_train[0], 1)")
+            raise RuntimeError("Y_train must be of shape of (X_train[0], 1)")
         
         #initilize the model params with uniform distribution in [0,1]
         self.model = np.reshape(np.random.rand(self.num_features + 1), (self.num_features + 1, 1))
-        # set the bais model weight to 1
+        # set the bias model weight to 1
         self.model[self.num_features][0] = 1
         
         train_algo = self.__batch_train if not sgd else self.__stochastic_train
@@ -97,7 +97,7 @@ class LinearRegression:
         
         test_Y = np.ndarray(shape = (num_samples,))
         if num_features + 1 != self.model.shape[0]: 
-            raise MalformedModel("test set feature space size does not match model")
+            raise RuntimeError("test set feature space size does not match model")
         
         transposed_model = np.transpose(self.model[:-1])
         for index, test_input in enumerate(test_X):
@@ -108,7 +108,10 @@ class LinearRegression:
 
     def __convergence(self):
         """
-        Check convergance of the model
+        Check convergance of the model, use the difference in 
+        model parameters as criteria for convergence instead 
+        of minimization of loss function which is typically more costly 
+        to compute at each iteration of batchGD/SGD. 
         """
         try:
             self.old_model
