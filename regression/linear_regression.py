@@ -35,8 +35,6 @@ class LinearRegression:
         
         #initilize the model params with uniform distribution in [0,1]
         self.model = np.reshape(np.random.rand(self.num_features + 1), (self.num_features + 1, 1))
-        # set the bias model weight to 1
-        self.model[self.num_features][0] = 1
         
         train_algo = self.__batch_train if not sgd else self.__stochastic_train
         
@@ -72,6 +70,7 @@ class LinearRegression:
         """
         for train_example, target in izip(self.X_train, self.Y_train):
             
+            last_gradient_update,cache = 0,1
             self.old_model  = np.copy(self.model)
             model_at_example = np.dot(train_example, self.old_model[:-1]) + self.old_model[self.num_features]
             for index, theta in enumerate(self.old_model):
@@ -81,8 +80,13 @@ class LinearRegression:
                 else:
                     gradient = (target - model_at_example)
                 
-                theta = theta + gradient * self.alpha
+                theta = theta + (gradient * (self.alpha / np.sqrt(cache + 1e-08)))
+                last_gradient_update += (gradient * gradient)
                 self.model[index][0] = theta
+            cache = last_gradient_update
+
+            
+            #update the cache to be as in Adagrad updated to  
             print self.model
 
     def predict(self, test_X):
