@@ -31,7 +31,7 @@ class LinearRegression:
         self.num_outputs, = self.Y_train.shape
         
         if self.num_outputs != self.num_samples:
-            raise RuntimeError("Y_train must be of shape of (X_train[0], 1)")
+            raise RuntimeError("Y_train must be of shape of (X_train[0], )")
         
         #initilize the model params with uniform distribution in [0,1]
         self.model = np.reshape(np.random.rand(self.num_features + 1), (self.num_features + 1, 1))
