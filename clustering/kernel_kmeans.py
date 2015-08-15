@@ -25,37 +25,56 @@ class KMeansKernel:
             "Unknown initialization scheme"
         self.initialization = initialization
         
-    def _cluster_compactness(self, ci, refresh = False):
+    def _cluster_compactness(self, ci, refresh = False, cj = None):
         """
         compute the cluster compactness of the ith cluster 
         :param ci : cluster label 
+        :param cj : optional cluster label, if specified 
+                    the compactness measure of two clusters combined will be
+                    computed, refresh will be ignored 
         :param refresh : ignore the memoized value and compute the 
-        new fresh value
+                         new fresh value
         """
         try:
             self._compactness
         except AttributeError, e:
             self._compactness = dict()
         
+        if cj: refresh = True 
+        else: cj = ci
+        
         if not refresh and self._compactness.has_key(ci):
             return self._compactness[ci]
         
-        num_c = len(self._clusters_old[ci])
+        num_ci = len(self._clusters_old[ci])
+        num_cj = len(self._clusters_old[cj])
         #no points assigned to this cluster return 0 as measure of compactness
-        if num_c == 0: 
-            self._compactness[ci] = 0 
+        if num_ci == 0 or num_cj == 0: 
+            if num_ci == 0: self._compactness[ci] = 0
+            if num_cj == 0: self._compactness[cj] = 0
             return 0
         
         mc = 0
         for i,ai in self._clusters_old[ci]:
-            for j,aj in self._clusters_old[ci]:
+            for j,aj in self._clusters_old[cj]:
                 mc += np.dot(ai, aj) 
         
-        mc = mc / (num_c * num_c)
-        self._compactness[ci] = mc
+        mc = mc / (num_ci * num_cj)
+        # cache only if cj is not specified 
+        if cj == ci: self._compactness[ci] = mc
         return mc
-        
-    def __kernel_distance(self, x, ci):
+    
+    def __centroid_distance(self, ci, cj):
+        """
+        compute the kernelized distance between centroids of 
+        cluster center ci and cj
+        :param ci : cluster label for ith cluster
+        :param cj : cluster label for jth cluster
+        """
+        return np.power(self._cluster_compactness(ci), 2) + np.power\
+            (self._cluster_compactness(cj), 2) - 2 * self._cluster_compactness(ci, cj)  
+
+    def __distance(self, x, ci):
         """
         compute the kernelized distance between vector x and a cluster center ci
         :param x : datapoint vector
@@ -135,7 +154,7 @@ class KMeansKernel:
             
             # assign points to the clusters 
             for data_index, data_point in enumerate(self.X):
-                min_dis, label = min([(abs(self.__kernel_distance(data_point, label)), label) for label \
+                min_dis, label = min([(abs(self.__distance(data_point, label)), label) for label \
                                           in self._clusters_old], key = lambda e : e[0])   
                 self._labels[data_index] = label
                 self._clusters[label].append((data_index,data_point))
@@ -151,8 +170,10 @@ class KMeansKernel:
                 cluster_center /= num_points
                 self._cluster_centers[cluster_label] = cluster_center
             self.iterations += 1
-        print "Number of iterations ran ::", self.iterations
         
+        print "Number of iterations ran ::", self.iterations
+        print "D-B index for clustering ::", self.__quality()
+
     def predict(self, X, Y = None):
         """
         predict the class labels for the data_points in test set X
@@ -162,7 +183,7 @@ class KMeansKernel:
             raise RuntimeError("X must be a list or a numpy ndarray")
         labels = []
         for data_point in X:
-            min_dis, label = min([(abs(self.__kernel_distance(data_point, label)), label) for label \
+            min_dis, label = min([(abs(self.__distance(data_point, label)), label) for label \
                                       in self._clusters], key = lambda e : e[0])   
             labels.append(label)
         if not Y: return labels
@@ -197,7 +218,33 @@ class KMeansKernel:
         print "cluster point movements ::", movements
         if movements <= 1:return True
         else: return False
-    
         
-
+    def __quality(self):
+        """
+        compute the quality of clustering based on Davies-Bouldin
+        index, lower values indicate better clustering
+        reference : https://en.wikipedia.org/wiki/Davies-Bouldin_index
+        """
+        #assign old clusters to new one to measure quality
+        self._clusters_old = self._clusters
+        
+        inter_cluster_distances = np.zeros(self.num_clusters)
+        intra_cluster_distances = np.zeros(shape = (self.num_clusters, self.num_clusters))
+        R = np.zeros(shape = (self.num_clusters, self.num_clusters))
+        D = np.zeros(self.num_clusters)
+        for ci, elements in self._clusters.items():
+            num_ci = len(elements)
+            inter_cluster_distances[ci] = sum([self.__distance(e, ci)  for l,e in elements]) / num_ci
+        
+        for ci in self._clusters:
+            for cj in self._clusters:
+                if ci >= cj: continue
+                intra_cluster_distances[ci,cj] = self._cluster_compactness(ci, cj)
+                intra_cluster_distances[cj,ci] = intra_cluster_distances[ci,cj]
+                R[ci,cj] = (inter_cluster_distances[ci] + inter_cluster_distances[cj]) \
+                    / intra_cluster_distances[ci, cj] 
+                R[cj,ci] = R[ci,cj]
+        
+        for ci in self._clusters: D[ci] = max(R[ci,:])
+        return sum(D) / self.num_clusters
 
