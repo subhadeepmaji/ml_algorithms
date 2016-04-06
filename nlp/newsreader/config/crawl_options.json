@@ -1,0 +1,13 @@
+{
+    "browser_user_agent" : "Mozilla/5.0 (Macintosh; U; Intel Mac OS X 10.6; en-US; rv:1.9.2.13; ) Gecko/20101203",
+    "MAX_TEXT"           : 100000000000,
+    "MAX_TITLE"          : 10000,
+    "MAX_KEYWORDS"       : 100000000000,
+    "MIN_WORD_COUNT"     : 20,
+    "MIN_SENT_COUNT"     : 10,
+    "memoize_articles"   : true,
+    "MAX_SUMMARY"        : 5000000,
+    "fetch_images"       : false,
+    "request_timeout"    : 20,
+    "number_threads"     : 10
+}

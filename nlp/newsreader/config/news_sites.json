@@ -1,0 +1,26 @@
+[
+	{
+	    "name"    : "TechCrunch",
+	    "url"     : "http://www.techcrunch.com",
+	    "threads" : 10
+	},
+	{
+	    "name"    : "Slate",
+	    "url"     : "http://www.slate.com",
+	    "threads" : 10
+	},
+	{
+	    "name"    : "Times Of India",
+	    "url"     : "http://www.timesofindia.indiatimes.com/",
+	    "threads" : 10
+	},
+        {
+	    "name"    : "NDTV",
+	    "url"     : "http://www.ndtv.com/",
+	    "threads" : 10
+	}
+
+]
+
+		
+    
