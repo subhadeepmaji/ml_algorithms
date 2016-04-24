@@ -27,12 +27,13 @@ class NewsArticleDao(object):
         build_connections(self.db_name, self.alias_name, self.connect_str)
 
     def form(self, source, title, location, text, summary = None,
-             keywords = [], open_graph = None):
+             keywords = [], open_graph = None, publish_date = None):
 
         article = NA.NewsArticle(source = source, title = title,
                                  location = location, text = text,
                                  summary = summary, keywords = keywords,
-                                 open_graph = open_graph)
+                                 open_graph = open_graph,
+                                 publish_date = publish_date)
         return article
 
     def save(self, article):

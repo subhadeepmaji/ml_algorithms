@@ -18,8 +18,49 @@
 	    "name"    : "NDTV",
 	    "url"     : "http://www.ndtv.com/",
 	    "threads" : 10
-	}
-
+	},
+    	{
+	    "name"    : "CNET",
+	    "url"     : "http://www.cnet.com",
+	    "threads" : 10
+	},
+        {
+	    "name"    : "Digit",
+	    "url"     : "http://www.digit.in/",
+	    "threads" : 10
+        },
+        {
+	    "name"    : "Newyork Times",
+	    "url"     : "http://www.nytimes.com/",
+	    "threads" : 10
+        },
+        {
+	    "name"    : "The Hindu",
+	    "url"     : "http://www.thehindu.com/",
+	    "threads" : 10
+        },
+        {
+	    "name"    : "TechTree",
+	    "url"     : "http://www.techtree.com/",
+	    "threads" : 10
+        },
+        {
+	    "name"    : "NDTV Gadgets",
+	    "url"     : "http://gadgets.ndtv.com/",
+	    "threads" : 10
+        },
+        {
+	    "name"    : "Gizmodo",
+	    "url"     : "http://www.gizmodo.in/",
+	    "threads" : 10
+        },
+        {
+	    "name"    : "Wired",
+	    "url"     : "http://www.wired.com/",
+	    "threads" : 10
+        }
+        
+    
 ]
 
 		

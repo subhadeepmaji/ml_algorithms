@@ -82,6 +82,7 @@ class NewsCrawler(object):
             a_location = article.url
             a_text     = article.text
             a_summary  = article.summary
+            a_date     = article.publish_date
             a_meta     = article.meta_data
             a_keywords, a_open_graph = None, None
             if 'keywords' in a_meta:
@@ -89,7 +90,8 @@ class NewsCrawler(object):
             if 'og' in a_meta:
                 a_open_graph = a_meta['og']
             news_article = newsDao.form(a_source, a_title, a_location, a_text,
-                                        a_summary, a_keywords, a_open_graph)
+                                        a_summary, a_keywords, a_open_graph,
+                                        a_date)
             newsDao.save(news_article)
         except Exception, e:
             logger.error(e)
@@ -112,7 +114,7 @@ class NewsCrawler(object):
                 
                 article.set_title(self.__sanitize_text(article.title))
                 logger.info("parsed and formed the document title")
-                
+
             if self.do_nlp  :
                 article.nlp()
                 article.set_summary(self.__sanitize_text(article.summary))
