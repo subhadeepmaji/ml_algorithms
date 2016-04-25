@@ -43,11 +43,12 @@ class HMM:
     An implementation of Hidden Markov Model with discrete state transitions
     and discrete output value(s)
     """
-    def __init__(self, smoothing=0.01):
+    def __init__(self, smoothing=0.01, tolerance=1e-4):
         self.states, self.emissions = [], []
         self.num_states, self.num_emissions = 0, 0
         self.iterations = 0
         self.smoothing = smoothing
+        self.tolerance = tolerance
 
     def add_state(self, state_name, prior=None):
         state = HMMState(self.num_states, state_name, prior)
@@ -76,6 +77,30 @@ class HMM:
             for _id, p in enumerate(probabilities):
                 state.set_transition_prob(_id, p)
 
+    def get_transition_matrix(self):
+        """
+        get the state transition matrix of the model
+        :return: np.ndarray of shape (num_states, num_states)
+        """
+        transition_matrix = np.ndarray(shape=(self.num_states, self.num_states), dtype=np.float128)
+        for state_id in xrange(self.num_states):
+            transitions = sorted(self.states[state_id].transitions.items(), key=lambda e: -e[0])
+            transitions = zip(*transitions)[1]
+            transition_matrix[state_id] = transitions
+        return transition_matrix
+
+    def get_emission_matrix(self):
+        """
+        get the state to output emission matrix of the model
+        :return: np.ndarray of shape (num_states, num_emissions)
+        """
+        emission_matrix = np.ndarray(shape=(self.num_states, self.num_emissions), dtype=np.float128)
+        for state_id in xrange(self.num_states):
+            emissions = sorted(self.states[state_id].emissions.items(), key=lambda e: -e[0])
+            emissions = zip(*emissions)[1]
+            emission_matrix[state_id] = emissions
+        return emission_matrix
+
     def add_emission_prob(self, prob_matrix):
         """
         add a emission probability matrix
@@ -89,7 +114,7 @@ class HMM:
             for emission_id, p in enumerate(emission_probabilities):
                 state.set_emission_prob(emission_id, p)
 
-    def compute_forward_prob(self, emitted_seq):
+    def __compute_forward_prob(self, emitted_seq):
         """
         compute the forward transition probability matrix
         :param emitted_seq: emission id sequence of emissions as training
@@ -113,7 +138,7 @@ class HMM:
 
         return forward_prob
 
-    def compute_backward_prob(self, emitted_seq):
+    def __compute_backward_prob(self, emitted_seq):
         """
         compute the backward transition probability matrix
         :param emitted_seq: emission id sequence of emissions as training
@@ -138,17 +163,32 @@ class HMM:
 
         return bckward_prob
 
-    def __converged(self, max_iterations):
+    def __converged(self, max_iterations, transition_matrix_old, emission_matrix_old):
         """
-        check for the convergance of the EM step
-        :param max_iterations: maximum number of iterations as upper cap for covergance
+        check for the convergence of the EM step
+        :param max_iterations: maximum number of iterations as upper cap for convergence
+        :param transition_matrix_old : state transitions matrix at time = (t - 1)
+        :param emission_matrix_old: state to output emission matrix at time = (t - 1)
         :return: true if converged false otherwise
         """
-        # To Do : implement a sophisticated criteria to check convergance,
-        # for now optimizing till we hit max iterations
         if self.iterations >= max_iterations:
             return True
-        return False
+        if self.iterations == 1:
+            return False
+
+        transition_matrix_new = self.get_transition_matrix()
+        emission_matrix_new = self.get_emission_matrix()
+
+        diff_transitions = transition_matrix_new - transition_matrix_old
+        diff_emissions = emission_matrix_new - emission_matrix_old
+
+        transitions_above_tolerance = np.count_nonzero(diff_transitions > self.tolerance)
+        emissions_above_tolerance = np.count_nonzero(diff_emissions > self.tolerance)
+
+        if transitions_above_tolerance > 0 or emissions_above_tolerance > 0:
+            return False
+
+        return True
 
     def train_supervised(self, train_sequences, train_prior=True):
         """
@@ -159,7 +199,6 @@ class HMM:
         :param train_prior: train the prior probabilities of the state(s)
         :return:
         """
-
         obs_emissions = {}
         obs_states = {}
 
@@ -209,58 +248,86 @@ class HMM:
         self.add_transition_prob(transition_matrix)
         self.add_emission_prob(emission_matrix)
 
-    def train_unsupervised(self, emission_seq, max_iter=100):
+    def train_unsupervised(self, emission_sequences, max_iter=100):
         """
-        Train the HMM on the Emission sequence using EM (Baum-Welch)
-        :param emission_seq: a sequence of emission value
+        Train the HMM on the Emission sequence(s) using EM (Baum-Welch),
+        time scales probabilities to avoid underflow
+
+        :param emission_sequences: a sequence of sequence of emission value,
+        where each sequence is a training emission sequence
         :param max_iter: maximum number of iterations to wait for convergence
         :return:
         """
-        # compute the forward probability of the sequence
         emissions = {}
         for emission in self.emissions:
             emissions[emission.value] = emission.em_id
 
-        emitted_seq = [emissions[val] for val in emission_seq]
-        sequence_len = len(emitted_seq)
+        emitted_sequences = []
+        for emission_seq in emission_sequences:
+            emitted_sequences.append([emissions[em_symbol] for em_symbol in emission_seq])
 
-        learning_matrix = np.ndarray(shape=(sequence_len, self.num_states, self.num_states), dtype=np.float128)
+        learning_matrices = []
         transition_matrix = np.ndarray(shape=(self.num_states, self.num_states), dtype=np.float128)
         emission_matrix = np.ndarray(shape=(self.num_states, self.num_emissions), dtype=np.float128)
 
-        self.iterations = 0
-        while not self.__converged(max_iter):
+        transition_matrix_old, emission_matrix_old = None, None
 
-            forward_prob = self.compute_forward_prob(emitted_seq)
-            bckward_prob = self.compute_backward_prob(emitted_seq)
+        self.iterations = 1
+        while not self.__converged(max_iter, transition_matrix_old, emission_matrix_old):
 
-            # E-step of EM
-            for time_seq in xrange(sequence_len):
-                for (i, j) in itertools.product(xrange(self.num_states), xrange(self.num_states)):
-                    bck_prob = 1 if time_seq == sequence_len - 1 else bckward_prob[j, time_seq + 1]
-                    learning_matrix[time_seq, i, j] = forward_prob[i, time_seq] \
-                                                      * self.states[i].get_transition_prob(j) \
-                                                      * self.states[j].get_emission_prob(emitted_seq[time_seq]) \
-                                                      * bck_prob
+            print "iteration number -> %d" % self.iterations
 
-            # M-step of E
+            transition_matrix_old = np.copy(transition_matrix)
+            emission_matrix_old = np.copy(emission_matrix)
+
+            for emitted_seq in emitted_sequences:
+                sequence_len = len(emitted_seq)
+
+                # initialize the learning matrix for the training sequence
+                learning_matrix = np.ndarray(shape=(sequence_len, self.num_states, self.num_states),
+                                             dtype=np.float128)
+                # compute the forward and the backward probability of the sequence
+                # based on current model parameters using Viterbi algorithm
+                forward_prob = self.__compute_forward_prob(emitted_seq)
+                bckward_prob = self.__compute_backward_prob(emitted_seq)
+
+                # E-step of EM algorithm
+                for time_seq in xrange(sequence_len):
+                    for (i, j) in itertools.product(xrange(self.num_states), xrange(self.num_states)):
+                        bck_prob = 1 if time_seq == sequence_len - 1 else bckward_prob[j, time_seq + 1]
+                        learning_matrix[time_seq, i, j] = forward_prob[i, time_seq] \
+                                                          * self.states[i].get_transition_prob(j) \
+                                                          * self.states[j].get_emission_prob(emitted_seq[time_seq]) \
+                                                          * bck_prob
+                learning_matrices.append(learning_matrix)
+
+            # M-step of EM algorithm
             for i in xrange(self.num_states):
                 for j in xrange(self.num_states):
-                    transition_matrix[i, j] = (np.sum(learning_matrix[:, i, j]) +
-                                               self.smoothing) / (np.sum(learning_matrix[:, i, :]) +
-                                                                  self.smoothing * self.num_states)
+                    transition_matrix[i, j] = 0
+                    for learning_matrix in learning_matrices:
+                        transition_matrix[i, j] += (np.sum(learning_matrix[:, i, j]) + self.smoothing) /\
+                                                  (np.sum(learning_matrix[:, i, :]) + (self.smoothing * self.num_states))
+
+            transition_matrix = (transition_matrix.T / np.sum(transition_matrix, axis=1)).T
 
             for j in xrange(self.num_states):
                 for k in xrange(self.num_emissions):
-                    matching_emission_seq = [_id for _id, emission_id in enumerate(emitted_seq) if emission_id == k]
-                    emission_matrix[j, k] = (np.sum(learning_matrix[matching_emission_seq, :, j]) + self.smoothing) / \
-                                            (np.sum(learning_matrix[:, :, j]) + self.smoothing * self.num_emissions)
+                    emission_matrix[j, k] = 0
+                    for learning_matrix in learning_matrices:
+                        emitted_indices = [_id for _id, emission_id in enumerate(emitted_seq) if emission_id == k]
+                        emission_matrix[j, k] += (np.sum(learning_matrix[emitted_indices, :, j]) + self.smoothing) \
+                                                 / np.sum(learning_matrix[:, :, j]) + (self.smoothing * self.num_emissions)
+
+            emission_matrix = (emission_matrix.T / np.sum(emission_matrix, axis=1)).T
 
             print "emission_matrix", emission_matrix
             print "transition_matrix", transition_matrix
 
+            print "-------------------------------------"
             self.add_emission_prob(emission_matrix)
             self.add_transition_prob(transition_matrix)
+
             self.iterations += 1
 
     def predict(self, emission_seq):
