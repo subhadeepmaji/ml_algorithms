@@ -150,12 +150,13 @@ class HMM:
             return True
         return False
 
-    def train_supervised(self, train_sequences):
+    def train_supervised(self, train_sequences, train_prior=True):
         """
         Train the HMM in a supervised manner using smoothed MLE estimates
          from the training set
         :param train_sequences: a sequence of sequences where each sequence is of type
         [(o,z)] where o is the observed output and z is the observed state
+        :param train_prior: train the prior probabilities of the state(s)
         :return:
         """
 
@@ -170,8 +171,10 @@ class HMM:
         # initialize the count DS to all zero's
         state_count = np.zeros(shape=(self.num_states,), dtype=np.uint32)
         state_bi_count = np.zeros(shape=(self.num_states,self.num_states), dtype=np.uint32)
-        state_initial = np.zeros(shape=(self.num_states,), dtype=np.uint32)
-        state_emission_count = np.zeros(shape=(self.num_states,self.num_emissions), dtype=np.uint32)
+        state_emission_count = np.zeros(shape=(self.num_states, self.num_emissions), dtype=np.uint32)
+
+        if train_prior:
+            state_initial = np.zeros(shape=(self.num_states,), dtype=np.uint32)
 
         for train_sequence in train_sequences:
             emission_seq, state_seq = zip(*train_sequence)
@@ -179,7 +182,8 @@ class HMM:
             emitted_seq = np.array([obs_emissions[em_symbol] for em_symbol in emission_seq])
             observed_state_seq = np.array([obs_states[obs_state] for obs_state in state_seq])
 
-            state_initial[observed_state_seq[0]] += 1
+            if train_prior:
+                state_initial[observed_state_seq[0]] += 1
 
             for state_id in xrange(self.num_states):
                 state_count[state_id] += np.count_nonzero(observed_state_seq == state_id)
@@ -197,9 +201,10 @@ class HMM:
         emission_matrix = (state_emission_count + self.smoothing) / \
                           (state_count[:, None] + self.smoothing * self.num_emissions)
 
-        for state_id in xrange(self.num_states):
-            self.states[state_id].prior = (state_initial[state_id] + self.smoothing)/ \
-                                          (len(train_sequences) + self.smoothing * self.num_states)
+        if train_prior:
+            for state_id in xrange(self.num_states):
+                self.states[state_id].prior = (state_initial[state_id] + self.smoothing) / \
+                                              (len(train_sequences) + self.smoothing * self.num_states)
 
         self.add_transition_prob(transition_matrix)
         self.add_emission_prob(emission_matrix)
