@@ -12,9 +12,10 @@ class HMMState:
     An HMM state, holds the transition and emission probabilities
     """
 
-    def __init__(self, node_id, name=None):
+    def __init__(self, node_id, name=None, prior=None):
         self.state_id = node_id
         self.state_name = name
+        self.prior = prior
         self.transitions = dict()
         self.emissions = dict()
 
@@ -42,13 +43,14 @@ class HMM:
     An implementation of Hidden Markov Model with discrete state transitions
     and discrete output value(s)
     """
-    def __init__(self):
+    def __init__(self, smoothing=0.01):
         self.states, self.emissions = [], []
         self.num_states, self.num_emissions = 0, 0
         self.iterations = 0
+        self.smoothing = smoothing
 
-    def add_state(self, state_name):
-        state = HMMState(self.num_states, state_name)
+    def add_state(self, state_name, prior=None):
+        state = HMMState(self.num_states, state_name, prior)
         self.states.append(state)
         self.num_states += 1
 
@@ -67,6 +69,9 @@ class HMM:
         for state_id in xrange(prob_matrix.shape[0]):
             state = self.states[state_id]
             probabilities = prob_matrix[state_id]
+
+            if not state.prior:
+                state.prior = (1 / self.num_states)
 
             for _id, p in enumerate(probabilities):
                 state.set_transition_prob(_id, p)
@@ -94,7 +99,7 @@ class HMM:
         forward_prob = np.ndarray(shape=(self.num_states, sequence_len), dtype=np.float128)
 
         for i in range(self.num_states):
-            forward_prob[i, 0] = (1 / self.num_states) * self.states[i].get_emission_prob(emitted_seq[0])
+            forward_prob[i, 0] = self.states[i].prior * self.states[i].get_emission_prob(emitted_seq[0])
 
         for time_seq in xrange(1, sequence_len):
             for j in xrange(self.num_states):
@@ -143,12 +148,65 @@ class HMM:
         # for now optimizing till we hit max iterations
         if self.iterations >= max_iterations:
             return True
-
         return False
 
-    def train(self, emission_seq, max_iter=100):
+    def train_supervised(self, train_sequences):
         """
-        Train the HMM on the Emission sequence
+        Train the HMM in a supervised manner using smoothed MLE estimates
+         from the training set
+        :param train_sequences: a sequence of sequences where each sequence is of type
+        [(o,z)] where o is the observed output and z is the observed state
+        :return:
+        """
+
+        obs_emissions = {}
+        obs_states = {}
+
+        for emission in self.emissions:
+            obs_emissions[emission.value] = emission.em_id
+        for state in self.states:
+            obs_states[state.state_name] = state.state_id
+
+        # initialize the count DS to all zero's
+        state_count = np.zeros(shape=(self.num_states,), dtype=np.uint32)
+        state_bi_count = np.zeros(shape=(self.num_states,self.num_states), dtype=np.uint32)
+        state_initial = np.zeros(shape=(self.num_states,), dtype=np.uint32)
+        state_emission_count = np.zeros(shape=(self.num_states,self.num_emissions), dtype=np.uint32)
+
+        for train_sequence in train_sequences:
+            emission_seq, state_seq = zip(*train_sequence)
+
+            emitted_seq = np.array([obs_emissions[em_symbol] for em_symbol in emission_seq])
+            observed_state_seq = np.array([obs_states[obs_state] for obs_state in state_seq])
+
+            state_initial[observed_state_seq[0]] += 1
+
+            for state_id in xrange(self.num_states):
+                state_count[state_id] += np.count_nonzero(observed_state_seq == state_id)
+
+            for (state_id_prev, state_id_id_current) in itertools.izip(observed_state_seq
+                    ,observed_state_seq[1:]):
+                state_bi_count[state_id_prev, state_id_id_current] += 1
+
+            for (state_id, emission_id) in itertools.izip(observed_state_seq
+                    , emitted_seq):
+                state_emission_count[state_id, emission_id] += 1
+
+        transition_matrix = (state_bi_count + self.smoothing) / \
+                            (state_count[:, None] + self.smoothing * self.num_states)
+        emission_matrix = (state_emission_count + self.smoothing) / \
+                          (state_count[:, None] + self.smoothing * self.num_emissions)
+
+        for state_id in xrange(self.num_states):
+            self.states[state_id].prior = (state_initial[state_id] + self.smoothing)/ \
+                                          (len(train_sequences) + self.smoothing * self.num_states)
+
+        self.add_transition_prob(transition_matrix)
+        self.add_emission_prob(emission_matrix)
+
+    def train_unsupervised(self, emission_seq, max_iter=100):
+        """
+        Train the HMM on the Emission sequence using EM (Baum-Welch)
         :param emission_seq: a sequence of emission value
         :param max_iter: maximum number of iterations to wait for convergence
         :return:
@@ -183,14 +241,15 @@ class HMM:
             # M-step of E
             for i in xrange(self.num_states):
                 for j in xrange(self.num_states):
-                    transition_matrix[i, j] = np.sum(learning_matrix[:, i, j]) / np.sum(learning_matrix[:, i, :])
+                    transition_matrix[i, j] = (np.sum(learning_matrix[:, i, j]) +
+                                               self.smoothing) / (np.sum(learning_matrix[:, i, :]) +
+                                                                  self.smoothing * self.num_states)
 
             for j in xrange(self.num_states):
                 for k in xrange(self.num_emissions):
                     matching_emission_seq = [_id for _id, emission_id in enumerate(emitted_seq) if emission_id == k]
-                    print matching_emission_seq
-                    emission_matrix[j, k] = np.sum(learning_matrix[matching_emission_seq, j, :]) / \
-                                            np.sum(learning_matrix[:, j, :])
+                    emission_matrix[j, k] = (np.sum(learning_matrix[matching_emission_seq, :, j]) + self.smoothing) / \
+                                            (np.sum(learning_matrix[:, :, j]) + self.smoothing * self.num_emissions)
 
             print "emission_matrix", emission_matrix
             print "transition_matrix", transition_matrix
@@ -216,7 +275,7 @@ class HMM:
         optimal_states = [None] * sequence_len
 
         for i in range(self.num_states):
-            forward_prob[i, 0] = (1 / self.num_states) * self.states[i].get_emission_prob(emitted_seq[0])
+            forward_prob[i, 0] = self.states[i].prior * self.states[i].get_emission_prob(emitted_seq[0])
 
         optimal_states[0] = self.states[np.argmax(forward_prob[:, 0])]
 
