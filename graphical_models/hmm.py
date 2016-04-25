@@ -84,7 +84,7 @@ class HMM:
         """
         transition_matrix = np.ndarray(shape=(self.num_states, self.num_states), dtype=np.float128)
         for state_id in xrange(self.num_states):
-            transitions = sorted(self.states[state_id].transitions.items(), key=lambda e: -e[0])
+            transitions = sorted(self.states[state_id].transitions.items(), key=lambda e: e[0])
             transitions = zip(*transitions)[1]
             transition_matrix[state_id] = transitions
         return transition_matrix
@@ -96,7 +96,7 @@ class HMM:
         """
         emission_matrix = np.ndarray(shape=(self.num_states, self.num_emissions), dtype=np.float128)
         for state_id in xrange(self.num_states):
-            emissions = sorted(self.states[state_id].emissions.items(), key=lambda e: -e[0])
+            emissions = sorted(self.states[state_id].emissions.items(), key=lambda e: e[0])
             emissions = zip(*emissions)[1]
             emission_matrix[state_id] = emissions
         return emission_matrix
@@ -227,12 +227,10 @@ class HMM:
             for state_id in xrange(self.num_states):
                 state_count[state_id] += np.count_nonzero(observed_state_seq == state_id)
 
-            for (state_id_prev, state_id_id_current) in itertools.izip(observed_state_seq
-                    ,observed_state_seq[1:]):
+            for (state_id_prev, state_id_id_current) in itertools.izip(observed_state_seq, observed_state_seq[1:]):
                 state_bi_count[state_id_prev, state_id_id_current] += 1
 
-            for (state_id, emission_id) in itertools.izip(observed_state_seq
-                    , emitted_seq):
+            for (state_id, emission_id) in itertools.izip(observed_state_seq, emitted_seq):
                 state_emission_count[state_id, emission_id] += 1
 
         transition_matrix = (state_bi_count + self.smoothing) / \
@@ -266,7 +264,6 @@ class HMM:
         for emission_seq in emission_sequences:
             emitted_sequences.append([emissions[em_symbol] for em_symbol in emission_seq])
 
-        learning_matrices = []
         transition_matrix = np.ndarray(shape=(self.num_states, self.num_states), dtype=np.float128)
         emission_matrix = np.ndarray(shape=(self.num_states, self.num_emissions), dtype=np.float128)
 
@@ -280,6 +277,7 @@ class HMM:
             transition_matrix_old = np.copy(transition_matrix)
             emission_matrix_old = np.copy(emission_matrix)
 
+            learning_matrices = []
             for emitted_seq in emitted_sequences:
                 sequence_len = len(emitted_seq)
 
