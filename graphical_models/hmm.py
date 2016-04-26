@@ -5,6 +5,7 @@ import numpy as np
 import itertools
 
 HMMEmission = namedtuple("HMMEmission", ['em_id', 'value'])
+OptimalAssignment = namedtuple("OptimalAssignment", ['optimal_state_sequence', 'forward_prob_matrix'])
 
 
 class HMMState:
@@ -305,7 +306,8 @@ class HMM:
                     transition_matrix[i, j] = 0
                     for learning_matrix in learning_matrices:
                         transition_matrix[i, j] += (np.sum(learning_matrix[:, i, j]) + self.smoothing) /\
-                                                  (np.sum(learning_matrix[:, i, :]) + (self.smoothing * self.num_states))
+                                                  (np.sum(learning_matrix[:, i, :])
+                                                   + (self.smoothing * self.num_states))
 
             transition_matrix = (transition_matrix.T / np.sum(transition_matrix, axis=1)).T
 
@@ -313,9 +315,11 @@ class HMM:
                 for k in xrange(self.num_emissions):
                     emission_matrix[j, k] = 0
                     for learning_matrix in learning_matrices:
-                        emitted_indices = [_id for _id, emission_id in enumerate(emitted_seq) if emission_id == k]
-                        emission_matrix[j, k] += (np.sum(learning_matrix[emitted_indices, :, j]) + self.smoothing) \
-                                                 / np.sum(learning_matrix[:, :, j]) + (self.smoothing * self.num_emissions)
+                        emitted_indices = [_id for _id, emission_id in enumerate(emitted_seq)
+                                           if emission_id == k]
+                        emission_matrix[j, k] += (np.sum(learning_matrix[emitted_indices, :, j])
+                                                  + self.smoothing) / np.sum(learning_matrix[:, :, j]) \
+                                                 + (self.smoothing * self.num_emissions)
 
             emission_matrix = (emission_matrix.T / np.sum(emission_matrix, axis=1)).T
 
@@ -328,33 +332,41 @@ class HMM:
 
             self.iterations += 1
 
-    def predict(self, emission_seq):
+    def predict(self, emission_sequences):
         """
         predict the most likely sequence of states for the emission sequence
-        :param emission_seq: the emission sequence as test input
-        :return: sequence of HMMState, forward probability matrix
+        :param emission_sequences: list of emission sequence(s) to predict the
+        best states sequence on
+        :return: sequence of (sequence of optimal HMMState assingment for the emission sequence,
+        forward probability matrix)
         """
         emissions = {}
         for emission in self.emissions:
             emissions[emission.value] = emission.em_id
 
-        emitted_seq = [emissions[val] for val in emission_seq]
-        sequence_len = len(emitted_seq)
+        optimal_assignments = []
 
-        forward_prob = np.ndarray(shape=(self.num_states, sequence_len), dtype=np.float128)
-        optimal_states = [None] * sequence_len
+        for emission_seq in emission_sequences:
+            emitted_seq = [emissions[val] for val in emission_seq]
+            sequence_len = len(emitted_seq)
 
-        for i in range(self.num_states):
-            forward_prob[i, 0] = self.states[i].prior * self.states[i].get_emission_prob(emitted_seq[0])
+            forward_prob = np.ndarray(shape=(self.num_states, sequence_len), dtype=np.float128)
+            optimal_state_sequence = [None] * sequence_len
 
-        optimal_states[0] = self.states[np.argmax(forward_prob[:, 0])]
+            for i in range(self.num_states):
+                forward_prob[i, 0] = self.states[i].prior * self.states[i].get_emission_prob(emitted_seq[0])
 
-        for time_seq in xrange(1, sequence_len):
-            for j in xrange(self.num_states):
-                optimal_states[time_seq], forward_prob[j, time_seq] = \
-                    max([(self.states[i], np.exp(np.log(forward_prob[i, time_seq - 1]) +
-                          np.log(self.states[i].get_transition_prob(j)) +
-                          np.log(self.states[j].get_emission_prob(emitted_seq[time_seq]))))
-                         for i in xrange(self.num_states)], key=lambda e: e[1])
+            optimal_state_sequence[0] = self.states[np.argmax(forward_prob[:, 0])]
 
-        return optimal_states, forward_prob
+            for time_seq in xrange(1, sequence_len):
+                for j in xrange(self.num_states):
+                    optimal_state_sequence[time_seq], forward_prob[j, time_seq] = \
+                        max([(self.states[i], np.exp(np.log(forward_prob[i, time_seq - 1]) +
+                                                     np.log(self.states[i].get_transition_prob(j)) +
+                                                     np.log(self.states[j].get_emission_prob(emitted_seq[time_seq]))))
+                                                     for i in xrange(self.num_states)], key=lambda e: e[1])
+
+            optimal_assignment = OptimalAssignment(optimal_state_sequence=optimal_state_sequence,
+                                                   forward_prob_matrix=forward_prob)
+            optimal_assignments.append(optimal_assignment)
+        return optimal_assignments
