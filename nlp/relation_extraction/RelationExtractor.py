@@ -262,17 +262,3 @@ class RelationExtractor:
                         relations.append(RelationTuple(left_entity=en0, right_entity=en1,
                                                        relation=relation, sentence=sentence))
         return relations
-
-
-
-
-
-
-
-
-
-
-
-
-
-
