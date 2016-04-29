@@ -9,11 +9,11 @@ import DataSource as DS
 # Named tuple definitions of semantic role labeling
 RelationTuple = namedtuple("RelationTuple", ['left_entity', 'right_entity', 'relation', 'sentence'])
 RelationArgument = namedtuple('RelationArgument', ['A0', 'A1', 'A2', 'A3'])
-RelationModifier = namedtuple('RelationModifier', ['DIR', 'LOC', 'TMP', 'MNR', 'EXT', 'PNC', 'CAU'])
+RelationModifier = namedtuple('RelationModifier', ['DIR', 'LOC', 'TMP', 'MNR', 'EXT', 'PNC', 'CAU', 'NEG'])
 EntityTuple = namedtuple('EntityTuple', ['index', 'value'])
 
 POS_TAG_ENTITY = ['NN', 'PRP', 'PRP$', 'NNP', 'NNS', 'NNPS', 'JJ', 'JJR', 'JJS',
-                  'CC', 'CD', 'IN']
+                  'CC', 'CD', 'IN', 'RB', 'RBR', 'RBS']
 PRONOUN_PHRASES = ['S-PP', 'B-PP', 'I-PP', 'E-PP']
 
 
@@ -140,7 +140,7 @@ class RelationExtractor:
         return RelationModifier(DIR=semantic_element.get('AM-DIR'), MNR=semantic_element.get('AM-MNR'),
                                 LOC=semantic_element.get('AM-LOC'), TMP=semantic_element.get('AM-TMP'),
                                 EXT=semantic_element.get('AM-EXT'), PNC=semantic_element.get('AM-PNC'),
-                                CAU=semantic_element.get('AM-CAU'))
+                                CAU=semantic_element.get('AM-CAU'), NEG=semantic_element.get('AM-NEG'))
 
     @staticmethod
     def word_tokenize_entity(words, entity):
@@ -240,18 +240,18 @@ class RelationExtractor:
                                               in enumerate(arguments) if i < j)]
 
                 modified_relations = []
-
                 for modifier in modifiers:
+
                     normalized_modifier = RelationExtractor.__form_entity(tokenized_sentence, modifier,
                                                                           chunk_parse, pos_tags)
-                    if normalized_modifier:
+
+                    if normalized_modifier or modifier.lower() in ['not']:
+                        normalized_modifier = normalized_modifier if normalized_modifier else modifier
                         modified_relation = self.__normalize_relation(verb + " " + normalized_modifier)
                         modified_relations.append(modified_relation)
                 else:
-                    modified_relations.append(self.__normalize_relation(verb))
-
-                if not modified_relations:
-                    modified_relations.append(self.__normalize_relation(verb))
+                    if not modified_relations:
+                        modified_relations.append(self.__normalize_relation(verb))
 
                 for a0, a1 in argument_pairs:
                     en0 = RelationExtractor.__form_entity(tokenized_sentence, a0, chunk_parse, pos_tags)
