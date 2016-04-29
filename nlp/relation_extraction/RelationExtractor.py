@@ -35,7 +35,6 @@ class RelationExtractor:
             assert isinstance(relation_sink, DS.DataSourceSink), "relation_sink object must be instance of  " +\
                                                                  "DS.DataSourceSink"
             self.relation_sink = relation_sink
-
         self.relation_annotator = pnt.Annotator()
         self.stemmer = PorterStemmer()
 
@@ -155,7 +154,6 @@ class RelationExtractor:
         words.append(" ")
         entity_char_tokens = [c for c in entity]
         tokenized_entity, split_index = [], []
-
         cover = [False] * (len(entity_char_tokens))
 
         for index, entity_c in enumerate(entity_char_tokens):
@@ -163,7 +161,6 @@ class RelationExtractor:
                            for j in xrange(index - 1, 0, -1)]
 
             assignments.append((-1, words.count("".join(entity_char_tokens[0: index + 1]))))
-
             if not assignments:
                 cover[index] = False
             else:
@@ -173,7 +170,6 @@ class RelationExtractor:
 
         end, start = split_index[-1]
         split_index = dict(split_index)
-
         while True:
             word_found = ''.join(entity_char_tokens[start + 1: end + 1])
             if word_found not in [' ']: tokenized_entity.append(word_found)
@@ -231,20 +227,16 @@ class RelationExtractor:
                 arguments = RelationExtractor.__populate_arguments(semantic_element)
                 modifiers = RelationExtractor.__populate_modifier(semantic_element)
                 verb = semantic_element.get('V')
-
                 # order of the arguments returned is important, A0 --> A1 --> A2 --> A3
                 arguments = [v for v in vars(arguments).itervalues() if v]
                 modifiers = [v for v in vars(modifiers).itervalues() if v]
 
                 argument_pairs = [e for e in ((ai, aj) for i, ai in enumerate(arguments) for j, aj
                                               in enumerate(arguments) if i < j)]
-
                 modified_relations = []
                 for modifier in modifiers:
-
                     normalized_modifier = RelationExtractor.__form_entity(tokenized_sentence, modifier,
                                                                           chunk_parse, pos_tags)
-
                     if normalized_modifier or modifier.lower() in ['not']:
                         normalized_modifier = normalized_modifier if normalized_modifier else modifier
                         modified_relation = self.__normalize_relation(verb + " " + normalized_modifier)
