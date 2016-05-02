@@ -1,10 +1,13 @@
-from practnlptools import tools as pnt
 from collections import namedtuple
+
+import logging, copy_reg, types
+import pattern.en as pattern
 from nltk.stem import PorterStemmer
 from nltk.tokenize import word_tokenize
+from practnlptools import tools as pnt
 
-import pattern.en as pattern
-import DataSource as DS
+import nlp.relation_extraction.data_source.source as DSource
+import nlp.relation_extraction.data_sink.sink as DSink
 
 # Named tuple definitions of semantic role labeling
 RelationTuple = namedtuple("RelationTuple", ['left_entity', 'right_entity', 'relation', 'sentence'])
@@ -16,25 +19,29 @@ POS_TAG_ENTITY = ['NN', 'PRP', 'PRP$', 'NNP', 'NNS', 'NNPS', 'JJ', 'JJR', 'JJS',
                   'CC', 'CD', 'IN', 'RB', 'RBR', 'RBS']
 PRONOUN_PHRASES = ['S-PP', 'B-PP', 'I-PP', 'E-PP']
 
+logger = logging.getLogger(__name__)
+
 
 class RelationExtractor:
     """
     Relation Extraction based on Semantic Role Labeling of SENNA
     """
-    def __init__(self, data_source=None, relation_sink=None):
+    def __init__(self, data_source=None, relation_sink=None, workers=5):
         """
         :param data_source: data_source object of type DataSource
         :param relation_sink: data_sink object of type DataSink
+        :param workers: number of child process workers in source sink mode
         """
         if data_source:
-            assert isinstance(data_source, DS.DataSourceSink), "data_source object must be instance of  " +\
-                                                               "DS.DataSourceSink"
+            assert isinstance(data_source, DSource.MongoDataSource),\
+                "data_source object must be instance of MongoDataSource"
             self.data_source = data_source
 
         if relation_sink:
-            assert isinstance(relation_sink, DS.DataSourceSink), "relation_sink object must be instance of  " +\
-                                                                 "DS.DataSourceSink"
+            assert isinstance(relation_sink, DSink.ElasticDataSink), \
+                "relation_sink object must be instance of ElasticDataSink"
             self.relation_sink = relation_sink
+
         self.relation_annotator = pnt.Annotator()
         self.stemmer = PorterStemmer()
 
@@ -199,7 +206,7 @@ class RelationExtractor:
         en0 = RelationExtractor.__normalize_entity(tokenized_arg, arg0_chunk_parse, arg0_pos_tag)
         return en0
 
-    def form_relation(self, text, persist=True):
+    def form_relations(self, text, persist=True):
         """
         form relation(s) on a given text
         :param text: text on which to get the relations on,
@@ -254,3 +261,42 @@ class RelationExtractor:
                         relations.append(RelationTuple(left_entity=en0, right_entity=en1,
                                                        relation=relation, sentence=sentence))
         return relations
+
+    def __form_relations(self):
+        while True:
+            try:
+                item_tuple = self.data_source.get_item()
+                if not item_tuple:
+                    logger.warn("read an empty element form the source")
+                    continue
+
+                logger.info("Read a data item from source")
+                logger.info(item_tuple)
+
+                for item_entry in item_tuple:
+                    if item_entry == ' ': continue
+                    try:
+                        relations = self.form_relations(item_entry)
+                    except Exception as e:
+                        logger.error(e)
+                        continue
+                    for relation in relations:
+                        sink_relation = self.relation_sink.model_identifier.model_class()
+                        sink_relation.leftEntity = relation.left_entity
+                        sink_relation.rightEntity = relation.right_entity
+                        sink_relation.relation = relation.relation
+                        sink_relation.text = relation.sentence
+                        logger.info("------ Formed a relation ------")
+                        logger.info(sink_relation)
+                        self.relation_sink.sink_item(sink_relation)
+
+            except RuntimeError as e:
+                break
+
+    def form_relations_from_source(self):
+
+        if not self.data_source or not self.relation_sink:
+            raise RuntimeError("Data source and sink must be set")
+        self.__form_relations()
+
+
