@@ -2,7 +2,7 @@ from datetime import datetime
 from elasticsearch_dsl import DocType, String, Date
 
 index = 'relation'
-mapping = 'faq'
+mapping = 'article'
 
 
 class Relation(DocType):
@@ -24,3 +24,4 @@ class Relation(DocType):
         return super(Relation, self).save(**kwargs)
 
 model_class = Relation
+

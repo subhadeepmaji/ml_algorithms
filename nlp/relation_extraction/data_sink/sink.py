@@ -8,6 +8,7 @@ from enum import Enum
 from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue, Full, Empty
+from threading import Lock
 
 import importlib, re, logging
 
@@ -64,10 +65,15 @@ class ElasticDataSink:
         self.name = name
         self.conn = conn
         self.model_identifier = model_identifier
+        self.state = ElasticDataSink.SinkState.inited
         self.pool = ThreadPoolExecutor(max_workers=workers)
         self.queue = Queue(maxsize=bound)
+        self.item_lock = Lock()
+        self.jobs = set()
 
     def start(self):
+        assert self.state == ElasticDataSink.SinkState.inited, "sink state must be inited "
+        self.state = ElasticDataSink.SinkState.started
         self.model_identifier.model_class.init(using = self.conn)
 
     def stop(self):
@@ -75,11 +81,18 @@ class ElasticDataSink:
             # already stopped return gracefully, without doing anything
             return
         self.state = ElasticDataSink.SourceState.stopped
-        self.pool.shutdown(wait=False)
+
+        # cancel all the pending future executions on the pool
+        for job in list(self.jobs):
+            job.cancel()
+        self.pool.shutdown(wait=True)
 
     def __sink_item(self):
         try:
+            self.item_lock.acquire()
             item = self.queue.get_nowait()
+            self.item_lock.release()
+
             self.queue.task_done()
             return item.save(using=self.conn)
         except Empty as e:
@@ -88,6 +101,18 @@ class ElasticDataSink:
         except Exception as e:
             raise RuntimeError("Error sinking the item to ES", e)
 
+    def __callback(self, item_future):
+        self.jobs.remove(item_future)
+        if self.state != ElasticDataSink.SinkState.started:
+            return
+
+        if item_future.exception():
+            logger.error("Error in future evaluation")
+            logger.error(item_future.exception())
+        else:
+            logger.info("output on future evaluation")
+            logger.info(item_future.result())
+
     def sink_item(self, item):
         assert isinstance(item, self.model_identifier.model_class), \
             " item must be instance of " + self.model_identifier.model_class
@@ -95,5 +120,8 @@ class ElasticDataSink:
             self.queue.put(item, timeout=10)
             # add a sink item job request
             f = self.pool.submit(self.__sink_item)
+            self.jobs.add(f)
+            f.add_done_callback(self.__callback)
+
         except Full as e:
             raise RuntimeError("Error sinking item queue full", e)

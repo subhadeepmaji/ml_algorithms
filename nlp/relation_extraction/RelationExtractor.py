@@ -165,7 +165,7 @@ class RelationExtractor:
 
         for index, entity_c in enumerate(entity_char_tokens):
             assignments = [(j, cover[j] and words.count("".join(entity_char_tokens[j + 1: index + 1])))
-                           for j in xrange(index - 1, 0, -1)]
+                           for j in xrange(index - 1, -1, -1)]
 
             assignments.append((-1, words.count("".join(entity_char_tokens[0: index + 1]))))
             if not assignments:
@@ -240,26 +240,23 @@ class RelationExtractor:
 
                 argument_pairs = [e for e in ((ai, aj) for i, ai in enumerate(arguments) for j, aj
                                               in enumerate(arguments) if i < j)]
-                modified_relations = []
-                for modifier in modifiers:
-                    normalized_modifier = RelationExtractor.__form_entity(tokenized_sentence, modifier,
-                                                                          chunk_parse, pos_tags)
-                    if normalized_modifier or modifier.lower() in ['not']:
-                        normalized_modifier = normalized_modifier if normalized_modifier else modifier
-                        modified_relation = self.__normalize_relation(verb + " " + normalized_modifier)
-                        modified_relations.append(modified_relation)
-                else:
-                    if not modified_relations:
-                        modified_relations.append(self.__normalize_relation(verb))
 
+                verb = self.__normalize_relation(verb)
                 for a0, a1 in argument_pairs:
                     en0 = RelationExtractor.__form_entity(tokenized_sentence, a0, chunk_parse, pos_tags)
                     en1 = RelationExtractor.__form_entity(tokenized_sentence, a1, chunk_parse, pos_tags)
                     if not en0 or not en1: continue
+                    relations.append(RelationTuple(left_entity=en0, right_entity=en1, relation=verb,
+                                                   sentence=sentence))
+                for arg_modifier in modifiers:
+                    mod_pos = sentence.find(arg_modifier)
+                    linked_arg = min([(a, abs(mod_pos - sentence.find(a))) for a in arguments], key=lambda e: e[1])[0]
+                    en0 = RelationExtractor.__form_entity(tokenized_sentence, linked_arg, chunk_parse, pos_tags)
+                    en1 = RelationExtractor.__form_entity(tokenized_sentence, arg_modifier, chunk_parse, pos_tags)
+                    if not en0 or not en1: continue
+                    relations.append(RelationTuple(left_entity=en0, right_entity=en1, relation=verb,
+                                                   sentence=sentence))
 
-                    for relation in modified_relations:
-                        relations.append(RelationTuple(left_entity=en0, right_entity=en1,
-                                                       relation=relation, sentence=sentence))
         return relations
 
     def __form_relations(self):
