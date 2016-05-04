@@ -4,11 +4,9 @@ from nlp.relation_extraction.data_sink import ELASTIC_HOST,ELASTIC_PORT
 from elasticsearch_dsl.connections import connections
 from os import listdir
 from os.path import isfile, join, abspath
-from enum import Enum
 from collections import namedtuple
+from queue import Full, Empty, Queue
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue, Full, Empty
-from threading import Lock
 
 import importlib, re, logging
 
@@ -56,72 +54,38 @@ class SinkLoader:
 
 class ElasticDataSink:
 
-    class SinkState(Enum):
-        inited = 1
-        started = 2
-        stopped = 3
-
     def __init__(self, name, conn, model_identifier, workers=5, bound=10000):
         self.name = name
         self.conn = conn
         self.model_identifier = model_identifier
-        self.state = ElasticDataSink.SinkState.inited
-        self.pool = ThreadPoolExecutor(max_workers=workers)
         self.queue = Queue(maxsize=bound)
-        self.item_lock = Lock()
-        self.jobs = set()
+        self.pool = ThreadPoolExecutor(max_workers=workers)
 
     def start(self):
-        assert self.state == ElasticDataSink.SinkState.inited, "sink state must be inited "
-        self.state = ElasticDataSink.SinkState.started
-        self.model_identifier.model_class.init(using = self.conn)
-
-    def stop(self):
-        if self.state == ElasticDataSink.SourceState.stopped:
-            # already stopped return gracefully, without doing anything
-            return
-        self.state = ElasticDataSink.SourceState.stopped
-
-        # cancel all the pending future executions on the pool
-        for job in list(self.jobs):
-            job.cancel()
-        self.pool.shutdown(wait=True)
+        self.model_identifier.model_class.init(using=self.conn)
 
     def __sink_item(self):
         try:
-            self.item_lock.acquire()
             item = self.queue.get_nowait()
-            self.item_lock.release()
-
-            self.queue.task_done()
-            return item.save(using=self.conn)
+            save_status = item.save(using=self.conn)
+            if not save_status:
+                logger.error("Error saving the item to the sink")
+            else:
+                logger.info("item saved to the sink")
         except Empty as e:
-            # nothing to do here, we didn't find anything
-            logger.info("no more elements in the queue ", e)
-        except Exception as e:
-            raise RuntimeError("Error sinking the item to ES", e)
-
-    def __callback(self, item_future):
-        self.jobs.remove(item_future)
-        if self.state != ElasticDataSink.SinkState.started:
-            return
-
-        if item_future.exception():
-            logger.error("Error in future evaluation")
-            logger.error(item_future.exception())
-        else:
-            logger.info("output on future evaluation")
-            logger.info(item_future.result())
+            logger.warn("sink queue is empty")
+            logger.warn(e)
 
     def sink_item(self, item):
         assert isinstance(item, self.model_identifier.model_class), \
             " item must be instance of " + self.model_identifier.model_class
+
         try:
             self.queue.put(item, timeout=10)
-            # add a sink item job request
-            f = self.pool.submit(self.__sink_item)
-            self.jobs.add(f)
-            f.add_done_callback(self.__callback)
-
+            self.pool.submit(self.__sink_item)
         except Full as e:
-            raise RuntimeError("Error sinking item queue full", e)
+            logger.error("sink queue is full")
+            logger.error(e)
+
+
+

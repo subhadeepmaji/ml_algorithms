@@ -5,11 +5,8 @@ from mongoengine import connect
 from os import listdir
 from os.path import isfile, join, abspath
 from collections import namedtuple
-from queue import Queue,Empty
-from enum import Enum
-from threading import Thread, Lock
+from threading import Lock
 
-from concurrent.futures import ThreadPoolExecutor
 import importlib, re, logging
 
 logger = logging.getLogger(__name__)
@@ -70,109 +67,34 @@ class MongoDataSource:
     for cursor managers to kill cursors on demand and misc features
     to handle cursor timeouts, batch read on cursor etc.
     """
-    class SourceState(Enum):
-        inited = 1
-        started = 2
-        stopped = 3
-
-    def __init__(self, name, db_conn, model_identifer, workers=5, bound=10000):
+    def __init__(self, name, db_conn, model_identifer):
         self.name = name
         self.db_conn = db_conn
         self.model_identifier = model_identifer
-        self.pool = ThreadPoolExecutor(max_workers=workers)
-        self.state = MongoDataSource.SourceState.inited
-        self.queue = Queue(maxsize=bound)
-        self.jobs = set()
-        self.item_lock = Lock()
 
     def start(self, query_filter=None):
-        """
-        start a data source object
-        :return:
-        """
-        assert self.state == MongoDataSource.SourceState.inited, \
-            "Data source not in inited state, cant start"
-
-        self.state = MongoDataSource.SourceState.started
         self.query_filter = query_filter
         self.items = self.model_identifier.model_class.objects
 
-    def stop(self):
-        """
-        stop a datasource
-        :return:
-        """
-        if self.state == MongoDataSource.SourceState.stopped:
-            # already stopped return gracefully, without doing anything
-            return
-        self.state = MongoDataSource.SourceState.stopped
+    def __iter__(self):
+        return self
 
-        for job in list(self.jobs):
-            job.cancel()
+    def __getstate__(self):
+        state = dict()
+        return state
 
-        # shutdown the executor pool
-        self.pool.shutdown(wait=True)
+    def __setstate__(self, d):
+        self.__dict__.update(d)
 
-    def __enqueue_item(self, item_future):
-        self.jobs.remove(item_future)
-        if self.state != MongoDataSource.SourceState.started :
-            # dont do anything just return, if the source is not in correct state
-            return
-
-        if item_future.exception():
-            logger.error("Error evaluating the future")
-            logger.error(item_future.exception())
-            self.stop()
-        else:
-            self.queue.put(item_future.result(), timeout=10)
-
-    def __submit_read_task(self):
-        kwargs = {'query_filter': self.query_filter}
-
-        # add this job only if the source is in started state
-        if self.state == MongoDataSource.SourceState.started:
-            f = self.pool.submit(self._get_item, **kwargs)
-            self.jobs.add(f)
-            f.add_done_callback(self.__enqueue_item)
-
-    def get_item(self):
-        assert self.state == MongoDataSource.SourceState.started, \
-            "data source should be in started state"
+    def next(self):
         try:
-            if self.queue.qsize() < 10:
-                for _ in xrange(30): self.__submit_read_task()
-
-            item = self.queue.get(block=True, timeout=10)
-            self.queue.task_done()
-            return item
-
-        except Empty as e:
-            logger.error("empty queue ")
-            logger.error(e)
-            return None
-
-        except Exception as e:
-            raise e
-
-    def _get_item(self, query_filter=None):
-        """
-        get a data item from the underlying source
-        :param query_filter: a dict as filter option(s) on the query,
-        default: None, retrieve all data in the collection
-        :return:
-        """
-        try:
-            self.item_lock.acquire()
             item = self.items.next()
-            self.item_lock.release()
-
             data_field_values = []
             for f in self.model_identifier.fields:
                 data_field_values.append(item[f])
             return tuple(data_field_values)
 
         except StopIteration as e:
-            raise RuntimeError("No more elements in the source", e)
-
+            raise e
         except Exception as e:
             raise RuntimeError("Unknown error on Source", e)

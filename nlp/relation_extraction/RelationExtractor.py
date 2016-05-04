@@ -1,32 +1,32 @@
-from collections import namedtuple
-
-import logging, copy_reg, types
 import pattern.en as pattern
+
 from nltk.stem import PorterStemmer
 from nltk.tokenize import word_tokenize
 from practnlptools import tools as pnt
+from threading import Thread
+from multiprocessing import Pool, Queue, Process, Manager
+from queue import Full, Empty
+
 
 import nlp.relation_extraction.data_source.source as DSource
 import nlp.relation_extraction.data_sink.sink as DSink
 
-# Named tuple definitions of semantic role labeling
-RelationTuple = namedtuple("RelationTuple", ['left_entity', 'right_entity', 'relation', 'sentence'])
-RelationArgument = namedtuple('RelationArgument', ['A0', 'A1', 'A2', 'A3'])
-RelationModifier = namedtuple('RelationModifier', ['DIR', 'LOC', 'TMP', 'MNR', 'EXT', 'PNC', 'CAU', 'NEG'])
-EntityTuple = namedtuple('EntityTuple', ['index', 'value'])
+from nlp.relation_extraction import RelationModifier, RelationArgument, EntityTuple, \
+    POS_TAG_ENTITY, PRONOUN_PHRASES, RelationTuple, JOB_LIB_TEMP_FOLDER
 
-POS_TAG_ENTITY = ['NN', 'PRP', 'PRP$', 'NNP', 'NNS', 'NNPS', 'JJ', 'JJR', 'JJS',
-                  'CC', 'CD', 'IN', 'RB', 'RBR', 'RBS']
-PRONOUN_PHRASES = ['S-PP', 'B-PP', 'I-PP', 'E-PP']
-
+import logging, time
 logger = logging.getLogger(__name__)
+
+
+def form_relation(object, item):
+    object.form_relations_source(item)
 
 
 class RelationExtractor:
     """
     Relation Extraction based on Semantic Role Labeling of SENNA
     """
-    def __init__(self, data_source=None, relation_sink=None, workers=5):
+    def __init__(self, data_source=None, relation_sink=None, workers=8):
         """
         :param data_source: data_source object of type DataSource
         :param relation_sink: data_sink object of type DataSink
@@ -41,9 +41,22 @@ class RelationExtractor:
             assert isinstance(relation_sink, DSink.ElasticDataSink), \
                 "relation_sink object must be instance of ElasticDataSink"
             self.relation_sink = relation_sink
+            self.model_class = self.relation_sink.model_identifier.model_class
 
         self.relation_annotator = pnt.Annotator()
         self.stemmer = PorterStemmer()
+        self.workers = workers
+        self.relation_queue = Manager().Queue(maxsize=10000)
+        self.persist_attributes = ['relation_annotator', 'stemmer', 'model_class', 'relation_queue']
+
+    def __getstate__(self):
+        state = dict()
+        for attr in self.persist_attributes:
+            state[attr] = self.__dict__[attr]
+        return state
+
+    def __setstate(self, d):
+        self.__dict__.update(d)
 
     @staticmethod
     def __normalize_entity(entity, chunk_parse, pos_tags):
@@ -238,6 +251,7 @@ class RelationExtractor:
                 arguments = [v for v in vars(arguments).itervalues() if v]
                 modifiers = [v for v in vars(modifiers).itervalues() if v]
 
+                if not arguments: continue
                 argument_pairs = [e for e in ((ai, aj) for i, ai in enumerate(arguments) for j, aj
                                               in enumerate(arguments) if i < j)]
 
@@ -259,41 +273,67 @@ class RelationExtractor:
 
         return relations
 
-    def __form_relations(self):
-        while True:
+    def form_relations_source(self, source_item):
+        if not source_item:
+            logger.error("got an empty source item")
+            return
+
+        for item_entry in source_item:
+            if item_entry == ' ': continue
             try:
-                item_tuple = self.data_source.get_item()
-                if not item_tuple:
-                    logger.warn("read an empty element form the source")
-                    continue
-
-                logger.info("Read a data item from source")
-                logger.info(item_tuple)
-
-                for item_entry in item_tuple:
-                    if item_entry == ' ': continue
-                    try:
-                        relations = self.form_relations(item_entry)
-                    except Exception as e:
-                        logger.error(e)
-                        continue
-                    for relation in relations:
-                        sink_relation = self.relation_sink.model_identifier.model_class()
-                        sink_relation.leftEntity = relation.left_entity
-                        sink_relation.rightEntity = relation.right_entity
-                        sink_relation.relation = relation.relation
-                        sink_relation.text = relation.sentence
-                        logger.info("------ Formed a relation ------")
-                        logger.info(sink_relation)
-                        self.relation_sink.sink_item(sink_relation)
-
+                relations = self.form_relations(item_entry)
             except RuntimeError as e:
-                break
+                logger.error("Error generating relations")
+                logger.error(e)
+                continue
+
+            for relation in relations:
+                sink_relation = self.model_class()
+                sink_relation.leftEntity = relation.left_entity
+                sink_relation.rightEntity = relation.right_entity
+                sink_relation.relation = relation.relation
+                sink_relation.text = relation.sentence
+                logger.info("generated a relation")
+                logger.info(sink_relation)
+
+                try:
+                    self.relation_queue.put(sink_relation, timeout=1)
+                except Full as e:
+                    logger.error(e)
+
+    def sink_relations(self):
+        while not self.all_sinked:
+            try:
+                item = self.relation_queue.get_nowait()
+                self.relation_sink.sink_item(item)
+            except Empty as e:
+                pass
 
     def form_relations_from_source(self):
 
         if not self.data_source or not self.relation_sink:
             raise RuntimeError("Data source and sink must be set")
-        self.__form_relations()
+
+        self.data_source.start()
+        self.relation_sink.start()
+
+        self.all_sinked = False
+        pool = Pool(processes=self.workers)
+        t1 = time.time()
+        pool.imap(self.form_relations_source, self.data_source, chunksize=8)
+
+        sinker = Thread(target=self.sink_relations, name='Sink-Thread')
+        sinker.start()
+
+        pool.close()
+        pool.join()
+        self.all_sinked = True
+        t2 = time.time()
+        logger.info("process finished in :: %d  seconds" %(t2 - t1))
+
+
+
+
+
 
 
