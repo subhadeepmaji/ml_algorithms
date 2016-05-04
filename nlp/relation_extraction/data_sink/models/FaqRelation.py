@@ -2,7 +2,7 @@ from datetime import datetime
 from elasticsearch_dsl import DocType, String, Date
 
 index = 'relation'
-mapping = 'faq_1'
+mapping = 'faq'
 
 
 class Relation(DocType):
