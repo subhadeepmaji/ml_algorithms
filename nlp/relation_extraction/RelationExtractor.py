@@ -331,9 +331,3 @@ class RelationExtractor:
         t2 = time.time()
         logger.info("process finished in :: %d  seconds" %(t2 - t1))
 
-
-
-
-
-
-
