@@ -20,8 +20,12 @@ RelationArgument = namedtuple('RelationArgument', ['A0', 'A1', 'A2', 'A3'])
 RelationModifier = namedtuple('RelationModifier', ['DIR', 'LOC', 'TMP', 'MNR', 'EXT', 'PNC', 'CAU', 'NEG'])
 EntityTuple = namedtuple('EntityTuple', ['index', 'value'])
 
-POS_TAG_ENTITY = ['NN', 'PRP', 'PRP$', 'NNP', 'NNS', 'NNPS', 'JJ', 'JJR', 'JJS',
+POS_TAG_ENTITY_NP = ['NN', 'PRP', 'PRP$', 'NNP', 'NNS', 'NNPS', 'JJ', 'JJR', 'JJS',
                   'CC', 'CD', 'IN', 'RB', 'RBR', 'RBS']
+
+POS_TAG_ENTITY_VP = ['VB', 'PRP', 'PRP$', 'VBD', 'VBG', 'VBN', 'JJ', 'JJR', 'JJS',
+                     'CC', 'CD', 'IN', 'RB', 'RBR', 'RBS', 'VBZ', 'VBP']
+
 PRONOUN_PHRASES = ['S-PP', 'B-PP', 'I-PP', 'E-PP']
 
 def _pickle_method(m):
