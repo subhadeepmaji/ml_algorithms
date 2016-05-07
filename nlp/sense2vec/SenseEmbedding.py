@@ -179,9 +179,3 @@ class SenseEmbedding(WordEmbedding.WordModel):
         pool.close()
         pool.join()
         self.batch_train(text_blocks=self.tokenized_blocks, tokenized=True)
-
-
-
-
-
-
