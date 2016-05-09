@@ -1,14 +1,16 @@
-from nlp.relation_extraction.data_sink import MODEL_PATH
-from nlp.relation_extraction.data_sink import ELASTIC_HOST,ELASTIC_PORT
-
-from elasticsearch_dsl.connections import connections
+import importlib
+import logging
+import re
+from collections import namedtuple
 from os import listdir
 from os.path import isfile, join, abspath
-from collections import namedtuple
-from queue import Full, Empty, Queue
-from concurrent.futures import ThreadPoolExecutor
 
-import importlib, re, logging
+from concurrent.futures import ThreadPoolExecutor
+from elasticsearch_dsl.connections import connections
+from queue import Full, Empty, Queue
+
+from nlp.relation_extraction.data_sink import ELASTIC_HOST,ELASTIC_PORT
+from nlp.relation_extraction.data_sink import MODEL_PATH
 
 logger = logging.getLogger(__name__)
 PY_FILE_REGEX = re.compile(".*\.py$")

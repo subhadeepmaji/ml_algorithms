@@ -1,14 +1,17 @@
 from __future__ import division
 
-from nltk import PorterStemmer, word_tokenize
-from nltk.corpus import stopwords
-from gensim.models.word2vec import Word2Vec
+import itertools
+import logging
+import mutex
+import random
+import re
 from itertools import tee
 
-import re, itertools, random, mutex
 import numpy as np
 import pattern.en as pattern
-import logging
+from gensim.models.word2vec import Word2Vec
+from nltk import PorterStemmer, word_tokenize
+from nltk.corpus import stopwords
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +176,15 @@ class WordModel:
         # point the model to newly created model
         self.model = model_new
         self.train_lock.unlock()
+
+    @__create_model__
+    def load_external(self, model_file_name):
+        """
+        load a word2vec model from the file specified
+        :param model_file_name: name of the model file
+        :return:
+        """
+        self.model = Word2Vec.load(model_file_name)
 
     def similarity(self, words):
         """

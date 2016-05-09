@@ -1,20 +1,17 @@
-import pattern.en as pattern
-
-from nltk.stem import PorterStemmer
-from nltk.tokenize import word_tokenize
-from practnlptools import tools as pnt
+import logging
+import time
+from multiprocessing import Pool, Manager
 from threading import Thread
-from multiprocessing import Pool, Queue, Process, Manager
+
+import pattern.en as pattern
+from nltk.stem import PorterStemmer
+from practnlptools import tools as pnt
 from queue import Full, Empty
 
-
-import nlp.relation_extraction.data_source.source as DSource
 import nlp.relation_extraction.data_sink.sink as DSink
-from nlp.relation_extraction.relation_util import utils as relation_util
-
+import nlp.relation_extraction.data_source.source as DSource
 from nlp.relation_extraction import RelationModifier, RelationArgument, RelationTuple
-
-import logging, time
+from nlp.relation_extraction.relation_util import utils as relation_util
 logger = logging.getLogger(__name__)
 
 

@@ -1,13 +1,14 @@
-from nlp.relation_extraction.data_source import MODEL_PATH
-from nlp.relation_extraction.data_source import MONGO_HOST, MONGO_PORT
-
-from mongoengine import connect
+import importlib
+import logging
+import re
+from collections import namedtuple
 from os import listdir
 from os.path import isfile, join, abspath
-from collections import namedtuple
-from threading import Lock
 
-import importlib, re, logging
+from mongoengine import connect
+
+from nlp.relation_extraction.data_source import MODEL_PATH
+from nlp.relation_extraction.data_source import MONGO_HOST, MONGO_PORT
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ class SourceLoader:
                 conn = connect(model.db_name, model.db_alias, host=self.connect_str)
             else:
                 conn = connect(model.db_name, model.db_alias, host=MONGO_HOST, port=MONGO_PORT)
-            model_name = model.db_name + "." + model.db_alias + "." + model.collection_name
+                model_name = model.db_name + "." + model.db_alias + "." + model.collection_name
             data_source = MongoDataSource(model_name, conn, model)
             self.data_sources[model_name] = data_source
 

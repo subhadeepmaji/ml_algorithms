@@ -1,17 +1,19 @@
-
-import pattern.en as pattern
-import nlp.relation_extraction.data_source.source as DSource
-from nlp.sense2vec import WordEmbedding
-from nlp.relation_extraction.relation_util import utils as relation_util
-from practnlptools import tools
+import logging
+import re
+import numpy as np
 from itertools import izip, chain
 from multiprocessing import Pool, Manager
-from enum import Enum
-from nlp.sense2vec import CONJUNCTION, CARDINAL, ADJECTIVE, NOUN, VERB
-from nltk.stem import PorterStemmer
-from nltk.corpus import stopwords
 
-import logging,re
+from enum import Enum
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from practnlptools import tools
+
+import nlp.relation_extraction.data_source.source as DSource
+from nlp.relation_extraction.relation_util import utils as relation_util
+from nlp.sense2vec import CONJUNCTION, CARDINAL, ADJECTIVE, NOUN, VERB
+from nlp.sense2vec import WordEmbedding
+
 logger = logging.getLogger(__name__)
 
 SENT_RE = re.compile(r"([A-Z]*[^\.!?]*[\.!?])", re.M)
@@ -34,6 +36,9 @@ class SenseEmbedding(WordEmbedding.WordModel):
         begin = 'B-NP'
         intermediate = 'I-NP'
         end = 'E-NP'
+
+    # DO NOT change this ordering, need to figure out a better way to achieve this
+    senses = ['NOUN', 'VERB', 'ADJECTIVE', 'CONJUNCTION', 'CARDINAL', 'DEFAULT']
 
     def __init__(self, data_sources, workers, *args, **kwargs):
         """
@@ -101,14 +106,19 @@ class SenseEmbedding(WordEmbedding.WordModel):
         sentences = SENT_RE.findall(text_block)
 
         for sentence in sentences:
-
             sentence = sentence.replace('\'', '').replace('(', ' ')\
                 .replace(')', ' ').replace("/", " or ").replace("-", "")
 
             sentence = TAG_RE.sub('', sentence)
             sentence = "".join((c for c in sentence if 0 < ord(c) < 127))
             logger.info("Will sense tokenize : %s" %sentence)
-            senna_annotation = self.annotator.getAnnotations(sentence)
+            try:
+                senna_annotation = self.annotator.getAnnotations(sentence)
+            except Exception as e:
+                logger.error("annontator error")
+                logger.error(e)
+                continue
+
             chunk_parse, pos_tags, words = senna_annotation['chunk'], senna_annotation['pos'], \
                                            senna_annotation['words']
 
@@ -137,7 +147,6 @@ class SenseEmbedding(WordEmbedding.WordModel):
             noun_index, verb_index, non_phrase_index = 0,0,0
             sense_words = []
             for (word, chunk_tag) in chunk_parse:
-
                 if chunk_tag not in self.phrase_tags:
                     if non_phrase_index < len(non_phrase_words):
                         sense_words.append(non_phrase_words[non_phrase_index])
@@ -154,6 +163,51 @@ class SenseEmbedding(WordEmbedding.WordModel):
                         verb_index += 1
 
             if sense_words: self.tokenized_blocks.append(sense_words)
+
+    def get_sense_vec(self, entity, dimension, sense='NOUN'):
+
+        if sense == 'NOUN':
+            if self.model.vocab.has_key(entity + '|NOUN'):
+                return self.model[entity + '|NOUN']
+
+            elif self.model.vocab.has_key(entity + '|NP'):
+                return self.model[entity + '|NP']
+
+            else:
+                entities = entity.split(" ")
+                entity_vec = [self.model[e + '|NOUN'] for e in entities if e + '|NOUN'
+                              in self.model.vocab]
+                entity_vec.extend([self.get_vector(e, dimension, 'NOUN') for e in entities
+                                   if e + '|NOUN' not in self.model.vocab])
+                return np.average(entity_vec, axis=0)
+
+        else:
+            if self.model.vocab.has_key(entity + '|VERB'):
+                return self.model[entity + '|VERB']
+
+            elif self.model.vocab.has_key(entity + '|VP'):
+                return self.model[entity + '|VP']
+
+            else:
+                entities = entity.split(" ")
+                entity_vec = [self.model[e + '|VERB'] for e in entities if e + '|VERB'
+                              in self.model.vocab]
+                entity_vec.extend([self.get_vector(e, dimension, 'VERB') for e in entities
+                                   if e + '|VERB' not in self.model.vocab])
+                return np.average(entity_vec, axis=0)
+
+    def get_vector(self, word, dimension, sense_except='NOUN'):
+
+        words = [word] * (len(SenseEmbedding.senses) - 1)
+        senses = list(SenseEmbedding.senses)
+        senses.remove(sense_except)
+        word_with_sense = [w + '|' + s for w,s in zip(words, senses)]
+        for word in word_with_sense:
+            if self.model.vocab.has_key(word):
+                return self.model[word]
+
+        return np.random.normal(0, 1, dimension)
+
 
     def form_model(self):
         text_blocks = []
