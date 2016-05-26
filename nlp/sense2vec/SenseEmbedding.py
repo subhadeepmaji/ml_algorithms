@@ -47,10 +47,6 @@ class SenseEmbedding(WordEmbedding.WordModel):
         :param workers: number of processes to create in the pool
         """
         WordEmbedding.WordModel.__init__(self, *args, **kwargs)
-        assert isinstance(data_sources, list), "data sources must be a list"
-        for source in data_sources:
-            assert isinstance(source, DSource.MongoDataSource), "source must be instance of " \
-                                                                "MongoDataSource"
         self.sources = data_sources
         self.annotator = tools.Annotator()
         self.phrase_tags = set([e.value for e in chain(*[SenseEmbedding.NPTags, SenseEmbedding.VPTags])])

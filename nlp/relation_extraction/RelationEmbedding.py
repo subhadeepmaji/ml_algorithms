@@ -239,6 +239,8 @@ class TransEEmbedding:
         self.margin = margin
         self.batch_size = batch_size
         self.entity_indices, self.relation_indices = {}, {}
+        self.entity_reverse_indices = {}
+        self.relation_reverse_indices = {}
         self.params = None
         self.kb_triples = None
         self.max_patience = max_patience
@@ -246,7 +248,15 @@ class TransEEmbedding:
         self.__inited, self.__has_model = False, False
         self.param_value_new, self.param_value_old = False, False
 
-    def initialize_model(self, kb_triples):
+    def initialize_model(self, kb_triples, embedding=None):
+        if embedding:
+            assert issubclass(embedding.__class__, SE.SenseEmbedding), \
+                "embedding must be subclass of sense embedding"
+            assert isinstance(embedding.model, Word2Vec), \
+                "embedding model must be instance of Word2Vec"
+
+            assert embedding.model.vector_size == self.dimension, \
+                "dimension of embedding model must match of supplied word embedding"
 
         lower_bound = -6 / np.sqrt(self.dimension)
         upper_bound = 6 / np.sqrt(self.dimension)
@@ -271,7 +281,6 @@ class TransEEmbedding:
         relation_matrix = np.random.uniform(low=lower_bound, high=upper_bound, size=(self.dimension, num_relations))
 
         relation_matrix /= np.linalg.norm(relation_matrix, axis=0, ord=2)
-        #entity_matrix /= np.linalg.norm(entity_matrix, axis=0, ord=2)
 
         # initialize the theano variables for entity and relations
         self.Entity = theano.shared(name='Entity', borrow=True, value=entity_matrix)
@@ -281,9 +290,11 @@ class TransEEmbedding:
         # form the entity and relation indices
         for index, entity in enumerate(entities):
             self.entity_indices[entity] = index
+            self.entity_reverse_indices[index] = entity
 
         for index, relation in enumerate(relations):
             self.relation_indices[relation] = index
+            self.relation_reverse_indices[index] = relation
 
         self.__inited = True
 
@@ -359,6 +370,7 @@ class TransEEmbedding:
         self.patience = 0
 
         triple_indices = range(len(self.kb_triples))
+        entity_indices = self.entity_indices.values()
         while not self.__converged(epochs, max_epochs):
             s_batch = np.random.choice(triple_indices, size=self.batch_size)
             s_batch = [self.kb_triples[i] for i in s_batch]
@@ -374,10 +386,12 @@ class TransEEmbedding:
                 relation = self.relation_indices[triple.relation]
                 pos_triple = [left_entity, right_entity, relation]
                 choice = random.randint(0, 1)
-                entity = random.choice(self.entity_indices.values())
+                entity = random.choice(entity_indices)
 
                 left_entity = entity if choice == 0 else left_entity
                 right_entity = entity if choice == 1 else right_entity
+                # form a polluted triple by randomly disturbing either the left entity
+                # or the right entity of a golden triple
                 neg_triple = [left_entity, right_entity, relation]
 
                 training_triple = pos_triple
@@ -388,6 +402,70 @@ class TransEEmbedding:
             self.model(training_batch)
             self.param_value_new = [p.get_value() for p in self.params]
             epochs += 1
+
+    def predict(self, left_entity=None, right_entity=None, relation=None, topn=10):
+        """
+        predict the completion for a partial triple, supported
+        inputs are (le,re), (le,rel), (re,rel),(le, re, rel)
+        if all are specified, the method returns the likelihood of existence of
+        the the input relation triple
+
+        :param left_entity: left entity of the relation triple
+        :param right_entity: right entity of the relation triple
+        :param relation: relation of relation triple
+        :param topn: return topn number of best completions, when working for
+        completion prediction otherwise ignored
+        :return: list of entity, list of relation or likelihood value
+        """
+        assert left_entity or relation or right_entity, "all inputs cannot be left unspecified"
+        is_le, is_re = bool(left_entity), bool(right_entity)
+        is_relation = bool(relation)
+
+        if int(is_le) + int(is_relation) + int(is_re) < 2:
+            raise RuntimeError("Atleast two of the inputs must be specified")
+
+        # compute the likelihood of the relation triple
+        if left_entity and relation and right_entity:
+            le_index = self.entity_indices[left_entity]
+            re_index = self.entity_indices[right_entity]
+            rel_index = self.relation_indices[relation]
+
+            le_vec, re_vec = self.Entity.get_value()[:, le_index], self.Entity.get_value()[:, re_index]
+            rel_vec = self.Relation.get_value()[:, rel_index]
+            similarity = le_vec + rel_vec - re_vec
+            if not similarity.any(): return 1
+            return 1 / np.linalg.norm(similarity, ord=2)
+
+        # complete either the left entity or the right entity of the relation
+        if (left_entity and relation) or (right_entity and relation):
+            entity = left_entity if left_entity else right_entity
+            entity_index = self.entity_indices[entity]
+            entity_vec = self.Entity.get_value()[:, entity_index]
+
+            rel_index = self.relation_indices[relation]
+            relation_vec = self.Relation.get_value()[:, rel_index]
+            entity = entity_vec + relation_vec if left_entity else entity_vec - relation_vec
+            entity_norm = np.linalg.norm(entity, ord=2)
+
+            candidates = [(index, np.dot(entity, candidate) / (entity_norm * np.linalg.norm(candidate, 2)))
+                          for index, candidate in enumerate(self.Entity.get_value().T)]
+            candidates = sorted(candidates, key=lambda e: -e[1])
+            return [(self.entity_reverse_indices[index], score) for index, score in candidates[:topn]]
+
+        # complete a relation for a given left and right entity
+        if left_entity and right_entity:
+            le_index = self.entity_indices[left_entity]
+            re_index = self.entity_indices[right_entity]
+            le_vec, re_vec = self.Entity.get_value()[:,le_index], self.Entity.get_value()[:,re_index]
+
+            relation = re_vec - le_vec
+            relation_norm = np.linalg.norm(relation, ord=2)
+
+            candidates = [(index, np.dot(relation, candidate) / (relation_norm * np.linalg.norm(candidate, 2)))
+                          for index, candidate in enumerate(self.Relation.get_value().T)]
+            candidates = sorted(candidates, key=lambda e: -e[1])
+            return [(self.relation_reverse_indices[index], score) for index, score in candidates[:topn]]
+
 
 
 
