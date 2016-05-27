@@ -424,6 +424,15 @@ class TransEEmbedding:
         if int(is_le) + int(is_relation) + int(is_re) < 2:
             raise RuntimeError("Atleast two of the inputs must be specified")
 
+        if left_entity and not self.entity_indices.has_key(left_entity):
+            raise RuntimeError("entity is not known %s" %left_entity)
+
+        if right_entity and not self.entity_indices.has_key(right_entity):
+            raise RuntimeError("entity is not known %s" % right_entity)
+
+        if relation and not self.relation_indices.has_key(relation):
+            raise RuntimeError("realation not known %s" %relation)
+
         # compute the likelihood of the relation triple
         if left_entity and relation and right_entity:
             le_index = self.entity_indices[left_entity]
