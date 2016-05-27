@@ -248,16 +248,7 @@ class TransEEmbedding:
         self.__inited, self.__has_model = False, False
         self.param_value_new, self.param_value_old = False, False
 
-    def initialize_model(self, kb_triples, embedding=None):
-        if embedding:
-            assert issubclass(embedding.__class__, SE.SenseEmbedding), \
-                "embedding must be subclass of sense embedding"
-            assert isinstance(embedding.model, Word2Vec), \
-                "embedding model must be instance of Word2Vec"
-
-            assert embedding.model.vector_size == self.dimension, \
-                "dimension of embedding model must match of supplied word embedding"
-
+    def initialize_model(self, kb_triples):
         lower_bound = -6 / np.sqrt(self.dimension)
         upper_bound = 6 / np.sqrt(self.dimension)
         self.kb_triples = kb_triples
@@ -474,6 +465,281 @@ class TransEEmbedding:
                           for index, candidate in enumerate(self.Relation.get_value().T)]
             candidates = sorted(candidates, key=lambda e: -e[1])
             return [(self.relation_reverse_indices[index], score) for index, score in candidates[:topn]]
+
+
+class TransHEmbedding:
+    """
+    Embedding of relations where realtions are expressed as
+    (el, r, er)
+
+    :param dimension: dimension of the entity and relation embedding
+    :param learning_rate: learning rate for batch GD
+    :param tolerance: tolerance parameter for convergence
+    :param margin : error margin to used for considering a tuple for training
+    :param batch_size : batch size of mini batch gradient descent training
+    :param max_patience : number of mini batches to hold patience for
+    reference : http://www.aaai.org/ocs/index.php/AAAI/AAAI14/paper/view/8531/8546
+    """
+    def __init__(self, dimension, learning_rate=1e-6, tolerance=1e-10, margin=1,
+                 epsilon = 1e-5, regularize_factor=0.025, batch_size=20,
+                 max_patience=10):
+        self.dimension = dimension
+        self.learning_rate = learning_rate
+        self.tolerance = tolerance
+        self.margin = margin
+        self.batch_size = batch_size
+        self.epsilon = epsilon
+        self.regularize_factor = regularize_factor
+        self.entity_indices, self.relation_indices = {}, {}
+        self.entity_reverse_indices = {}
+        self.relation_reverse_indices = {}
+        self.params = None
+        self.kb_triples = None
+        self.max_patience = max_patience
+        self.patience = 0
+        self.__inited, self.__has_model = False, False
+        self.param_value_new, self.param_value_old = False, False
+
+    def initialize_model(self, kb_triples):
+        lower_bound = -6 / np.sqrt(self.dimension)
+        upper_bound = 6 / np.sqrt(self.dimension)
+        self.kb_triples = []
+        entities, relations = set(), set()
+
+        self.kb_triples.extend(kb_triples)
+        for triple in kb_triples:
+            self.kb_triples.append(RelationTuple(triple.right_entity, triple.left_entity,
+                                                 triple.relation, None))
+
+        for knowledge_tuple in self.kb_triples:
+            if not isinstance(knowledge_tuple, RelationTuple):
+                raise RuntimeError("relation must be an instance of RelationTuple")
+
+            l_entity, r_entity, relation = knowledge_tuple.left_entity, knowledge_tuple.right_entity, \
+                                           knowledge_tuple.relation
+            entities.add(l_entity)
+            entities.add(r_entity)
+            relations.add(relation)
+
+        entities = list(entities)
+        relations = list(relations)
+        num_entities, num_relations = len(entities), len(relations)
+
+        entity_matrix = np.random.uniform(low=lower_bound,high=upper_bound,size=(self.dimension, num_entities))
+        relation_matrix = np.random.uniform(low=lower_bound,high=upper_bound,size=(self.dimension, num_relations))
+        relation_normal = np.random.uniform(low=lower_bound,high=upper_bound,size=(self.dimension, num_relations))
+
+        relation_normal /= np.linalg.norm(relation_normal, axis=0, ord=2)
+
+        # initialize the theano variables for entity and relations
+        self.Entity = theano.shared(name='Entity', borrow=True, value=entity_matrix)
+        self.Relation = theano.shared(name='Relation', borrow=True, value=relation_matrix)
+        self.RelationNormal = theano.shared(name='RelationNormal', borrow=True, value=relation_normal)
+
+        self.params = [self.Entity, self.Relation, self.RelationNormal]
+
+        # form the entity and relation indices
+        for index, entity in enumerate(entities):
+            self.entity_indices[entity] = index
+            self.entity_reverse_indices[index] = entity
+
+        for index, relation in enumerate(relations):
+            self.relation_indices[relation] = index
+            self.relation_reverse_indices[index] = relation
+
+        self.__inited = True
+
+    def __objective_triple(self, triple):
+        l_index, r_index, relation_index = triple[0], triple[1], triple[2]
+
+        h = self.Entity[:,l_index]
+        t = self.Entity[:,r_index]
+        d_r = self.Relation[:,relation_index]
+        w_r = self.RelationNormal[:,relation_index]
+
+        l = h - T.dot(w_r, h) * w_r
+        e = t - T.dot(w_r, t) * w_r
+        return T.square((l + d_r - e).norm(2))
+
+    def __compute_objective(self, triple):
+        l_index, r_index, relation_index = triple[0], triple[1], triple[2]
+
+        h = self.Entity.get_value()[:, l_index]
+        t = self.Entity.get_value()[:, r_index]
+        d_r = self.Relation.get_value()[:, relation_index]
+        w_r = self.RelationNormal.get_value()[:, relation_index]
+
+        l = h - np.dot(w_r, h) * w_r
+        e = t - np.dot(w_r, t) * w_r
+        return np.linalg.norm(l + d_r - e, ord=2) ** 2
+
+    def __mapper(self, train_example):
+        pos_triple, neg_triple = train_example[0:3], train_example[3:]
+
+        unconstrained_objective = self.margin - self.__objective_triple(neg_triple) \
+                                  + self.__objective_triple(pos_triple)
+
+        entity_normalize = T.sum(T.square(self.Entity.norm(2, axis=0)) - 1)
+        relation_normalize = T.square(self.Relation.norm(2, axis=0))
+        surface_normalize = T.square(T.diagonal(T.dot(self.RelationNormal.T, self.Relation))) \
+                            / relation_normalize
+
+        surface_normalize = T.sum(surface_normalize - self.epsilon ** 2)
+
+        unconstrained_objective_positive = ifelse(T.gt(unconstrained_objective, theano.shared(0.0)),
+                                                  unconstrained_objective, theano.shared(0.0))
+
+        entity_normalize_positive = ifelse(T.gt(entity_normalize, theano.shared(0.0)),
+                                           entity_normalize, theano.shared(0.0))
+
+        surface_normalize_positive = ifelse(T.gt(surface_normalize, theano.shared(0.0)),
+                                            surface_normalize, theano.shared(0.0))
+
+        return unconstrained_objective_positive + self.regularize_factor * (entity_normalize_positive
+                                                                            + surface_normalize_positive)
+
+    def __objective(self, mini_batch):
+        relaxed_margins, updates = theano.scan(lambda e: self.__mapper(e), sequences=mini_batch)
+        return T.sum(relaxed_margins)
+
+    def __gradients(self, mini_batch):
+        objective = self.__objective(mini_batch)
+        gradient_entity = T.grad(objective, wrt=self.Entity)
+        gradient_relation = T.grad(objective, wrt=self.Relation)
+        gradient_surface = T.grad(objective, wrt=self.RelationNormal)
+
+        return gradient_entity, gradient_relation, gradient_surface
+
+    def __converged(self, epoch, max_epochs):
+        if epoch <= 1: return False
+        if epoch >= max_epochs:
+            logger.warn("Reaching maximum iterations, model parameters may not have converged")
+            return True
+
+        diff_params = [v_new - v_old for (v_new, v_old) in izip(self.param_value_new, self.param_value_old)]
+        above_tolerance = [np.count_nonzero(e > self.tolerance) for e in diff_params]
+
+        if not max(above_tolerance):
+            if self.patience < self.max_patience:
+                logger.info("used up one unit of patience")
+                self.patience += 1
+                return False
+            else:
+                return True
+        else:
+            if self.patience > 0:
+                logger.info("we found another minima, resetting patience to 0")
+                self.patience = 0
+            return False
+
+    def form_model(self):
+        if not self.__inited: raise RuntimeError("model must be initialized first before creating")
+
+        mini_batch = T.matrix('mini_batch', dtype='int32')
+        gradient_entity, gradient_relation, gradient_surface = self.__gradients(mini_batch)
+
+        updated_entity = self.Entity - self.learning_rate * gradient_entity
+        updated_relation = self.Relation - self.learning_rate * gradient_relation
+
+        updated_relation_normal = self.RelationNormal - self.learning_rate * gradient_surface
+        updated_relation_normal = updated_relation_normal / updated_relation_normal.norm(2, axis=0)
+
+        updates = [(self.Entity, updated_entity), (self.Relation, updated_relation),
+                   (self.RelationNormal, updated_relation_normal)]
+
+        logger.info("Will form the Relation embedding model")
+        self.model = theano.function(inputs=[mini_batch], updates=updates)
+        logger.info("successfully formed the model ")
+        self.__has_model = True
+
+    def train(self, max_epochs=10000):
+        if not self.__inited or not self.__has_model:
+            raise RuntimeError("model must be initialized and then created first before training")
+
+        epochs = 1
+        self.patience = 0
+
+        triple_indices = range(len(self.kb_triples))
+        entity_indices = self.entity_indices.values()
+        while not self.__converged(epochs, max_epochs):
+            s_batch = np.random.choice(triple_indices, size=self.batch_size)
+            s_batch = [self.kb_triples[i] for i in s_batch]
+            training_batch = []
+
+            if epochs % 100 == 0:
+                logger.info("=====starting training epoch : %d=====" % epochs)
+
+            # form a mini batch of input
+            for triple in s_batch:
+                left_entity, right_entity = self.entity_indices[triple.left_entity], \
+                                            self.entity_indices[triple.right_entity]
+                relation = self.relation_indices[triple.relation]
+                pos_triple = [left_entity, right_entity, relation]
+                choice = random.randint(0, 1)
+                entity = random.choice(entity_indices)
+
+                left_entity = entity if choice == 0 else left_entity
+                right_entity = entity if choice == 1 else right_entity
+                # form a polluted triple by randomly disturbing either the left entity
+                # or the right entity of a golden triple
+                neg_triple = [left_entity, right_entity, relation]
+
+                training_triple = pos_triple
+                training_triple.extend(neg_triple)
+                training_batch.append(training_triple)
+
+            self.param_value_old = [T.copy(p).get_value() for p in self.params]
+            self.model(training_batch)
+            self.param_value_new = [p.get_value() for p in self.params]
+            epochs += 1
+
+    def predict(self, left_entity=None, right_entity=None, relation=None, topn=10):
+        """
+        predict the completion for a partial triple, supported
+        inputs are (le,re), (le,rel), (re,rel),(le, re, rel)
+        if all are specified, the method returns the likelihood of existence of
+        the the input relation triple
+
+        :param left_entity: left entity of the relation triple
+        :param right_entity: right entity of the relation triple
+        :param relation: relation of relation triple
+        :param topn: return topn number of best completions, when working for
+        completion prediction otherwise ignored
+        :return: list of entity, list of relation or likelihood value
+        """
+        assert left_entity or relation or right_entity, "all inputs cannot be left unspecified"
+        is_le, is_re = bool(left_entity), bool(right_entity)
+        is_relation = bool(relation)
+
+        if int(is_le) + int(is_relation) + int(is_re) < 2:
+            raise RuntimeError("Atleast two of the inputs must be specified")
+
+        if left_entity and not self.entity_indices.has_key(left_entity):
+            raise RuntimeError("entity is not known %s" % left_entity)
+
+        if right_entity and not self.entity_indices.has_key(right_entity):
+            raise RuntimeError("entity is not known %s" % right_entity)
+
+        if relation and not self.relation_indices.has_key(relation):
+            raise RuntimeError("relation not known %s" % relation)
+
+        # complete the right entity of the relation
+        if left_entity and relation:
+            l_index = self.entity_indices[left_entity]
+            rel_index = self.relation_indices[relation]
+            candidates = [(r_index, self.__compute_objective([l_index, r_index, rel_index]))
+                          for r_index, candidate in enumerate(self.Entity.get_value().T)]
+            candidates = sorted(candidates, key=lambda e: e[1])
+            return [(self.entity_reverse_indices[index], score) for index, score in candidates[:topn]]
+
+        # complete the left entity of the relation
+        if right_entity and relation:
+            r_index = self.entity_indices[right_entity]
+            rel_index = self.relation_indices[relation]
+            candidates = [(l_index, self.__compute_objective([l_index, r_index, rel_index]))
+                          for l_index, candidate in enumerate(self.Entity.get_value().T)]
+            candidates = sorted(candidates, key=lambda e: e[1])
+            return [(self.entity_reverse_indices[index], score) for index, score in candidates[:topn]]
 
 
 
