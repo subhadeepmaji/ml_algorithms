@@ -1,18 +1,17 @@
 import logging
 import re
-import numpy as np
 from itertools import izip, chain
 from multiprocessing import Pool, Manager
 
+import numpy as np
 from enum import Enum
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 from practnlptools import tools
 
-import nlp.relation_extraction.data_source.source as DSource
+from nlp.embedding import WordEmbedding
 from nlp.relation_extraction.relation_util import utils as relation_util
 from nlp.sense2vec import CONJUNCTION, CARDINAL, ADJECTIVE, NOUN, VERB
-from nlp.sense2vec import WordEmbedding
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +202,6 @@ class SenseEmbedding(WordEmbedding.WordModel):
                 return self.model[word]
 
         return np.random.normal(0, 1, dimension)
-
 
     def form_model(self):
         text_blocks = []

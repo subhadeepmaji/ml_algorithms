@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 
 class BengioEmbedding:
 
-    def __init__(self, dimension, learning_rate=1e-6, tolerance=1e-10,
-                 max_patience=5):
+    def __init__(self, dimension, learning_rate=1e-2, tolerance=1e-5, max_patience=5):
         """
         embedding of relation tuples, where relation tuples are expressed
         as (el, r, er),
@@ -480,9 +479,8 @@ class TransHEmbedding:
     :param max_patience : number of mini batches to hold patience for
     reference : http://www.aaai.org/ocs/index.php/AAAI/AAAI14/paper/view/8531/8546
     """
-    def __init__(self, dimension, learning_rate=1e-6, tolerance=1e-10, margin=1,
-                 epsilon = 1e-5, regularize_factor=0.025, batch_size=20,
-                 max_patience=10):
+    def __init__(self, dimension, learning_rate=1e-2, tolerance=1e-5, margin=1,
+                 epsilon = 1e-5, regularize_factor=0.5, batch_size=10, max_patience=10):
         self.dimension = dimension
         self.learning_rate = learning_rate
         self.tolerance = tolerance
@@ -497,19 +495,29 @@ class TransHEmbedding:
         self.kb_triples = None
         self.max_patience = max_patience
         self.patience = 0
+        self.lower_bound = -6 / np.sqrt(self.dimension)
+        self.upper_bound = 6 / np.sqrt(self.dimension)
         self.__inited, self.__has_model = False, False
         self.param_value_new, self.param_value_old = False, False
 
-    def initialize_model(self, kb_triples):
-        lower_bound = -6 / np.sqrt(self.dimension)
-        upper_bound = 6 / np.sqrt(self.dimension)
-        self.kb_triples = []
-        entities, relations = set(), set()
+    def form_vec(self, entity, embedding, sense='NOUN'):
+        if not embedding:
+            return np.random.uniform(self.lower_bound, self.upper_bound, self.dimension)
+        return embedding.get_sense_vec(entity, self.dimension, sense)
 
-        self.kb_triples.extend(kb_triples)
-        for triple in kb_triples:
-            self.kb_triples.append(RelationTuple(triple.right_entity, triple.left_entity,
-                                                 triple.relation, None))
+    def initialize_model(self, kb_triples, embedding=None):
+
+        if embedding:
+            assert issubclass(embedding.__class__, SE.SenseEmbedding), \
+                "embedding must be subclass of sense embedding"
+            assert isinstance(embedding.model, Word2Vec), \
+                "embedding model must be instance of Word2Vec"
+
+            assert embedding.model.vector_size == self.dimension, \
+                "dimension of embedding model must match of supplied word embedding"
+
+        self.kb_triples = kb_triples
+        entities, relations = set(), set()
 
         for knowledge_tuple in self.kb_triples:
             if not isinstance(knowledge_tuple, RelationTuple):
@@ -525,9 +533,25 @@ class TransHEmbedding:
         relations = list(relations)
         num_entities, num_relations = len(entities), len(relations)
 
-        entity_matrix = np.random.uniform(low=lower_bound,high=upper_bound,size=(self.dimension, num_entities))
-        relation_matrix = np.random.uniform(low=lower_bound,high=upper_bound,size=(self.dimension, num_relations))
-        relation_normal = np.random.uniform(low=lower_bound,high=upper_bound,size=(self.dimension, num_relations))
+        if embedding:
+            entity_vectors, relation_vectors = [], []
+            for entity in entities:
+                entity_vectors.append(self.form_vec(entity, embedding, sense='NOUN'))
+            for relation in relations:
+                relation_vectors.append(self.form_vec(relation, embedding, sense='VERB'))
+
+            entity_matrix = np.array(entity_vectors, dtype=np.float).T
+            relation_normal = np.array(relation_vectors, dtype=np.float).T
+        else:
+
+            entity_matrix = np.random.uniform(low=self.lower_bound,high=self.upper_bound,
+                                              size=(self.dimension, num_entities))
+            relation_normal = np.random.uniform(low=self.lower_bound,high=self.upper_bound,
+                                                size=(self.dimension, num_relations))
+
+        # initialize relation matrices to ~ uniform(low_bound, upper_bound)
+        relation_matrix = np.random.uniform(low=self.lower_bound, high=self.upper_bound,
+                                            size=(self.dimension, num_relations))
 
         relation_normal /= np.linalg.norm(relation_normal, axis=0, ord=2)
 
@@ -581,8 +605,7 @@ class TransHEmbedding:
 
         entity_normalize = T.sum(T.square(self.Entity.norm(2, axis=0)) - 1)
         relation_normalize = T.square(self.Relation.norm(2, axis=0))
-        surface_normalize = T.square(T.diagonal(T.dot(self.RelationNormal.T, self.Relation))) \
-                            / relation_normalize
+        surface_normalize = T.square(T.diagonal(T.dot(self.RelationNormal.T, self.Relation))) / relation_normalize
 
         surface_normalize = T.sum(surface_normalize - self.epsilon ** 2)
 
@@ -595,8 +618,8 @@ class TransHEmbedding:
         surface_normalize_positive = ifelse(T.gt(surface_normalize, theano.shared(0.0)),
                                             surface_normalize, theano.shared(0.0))
 
-        return unconstrained_objective_positive + self.regularize_factor * (entity_normalize_positive
-                                                                            + surface_normalize_positive)
+        return unconstrained_objective_positive + self.regularize_factor \
+                                                  * (surface_normalize_positive + entity_normalize_positive)
 
     def __objective(self, mini_batch):
         relaxed_margins, updates = theano.scan(lambda e: self.__mapper(e), sequences=mini_batch)
@@ -639,6 +662,7 @@ class TransHEmbedding:
         gradient_entity, gradient_relation, gradient_surface = self.__gradients(mini_batch)
 
         updated_entity = self.Entity - self.learning_rate * gradient_entity
+        #updated_entity = updated_entity / updated_entity.norm(2, axis=0)
         updated_relation = self.Relation - self.learning_rate * gradient_relation
 
         updated_relation_normal = self.RelationNormal - self.learning_rate * gradient_surface
