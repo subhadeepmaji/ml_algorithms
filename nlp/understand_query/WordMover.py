@@ -114,8 +114,3 @@ class WordMoverModel:
         self.form_doc_bags()
 
 
-
-
-
-
-

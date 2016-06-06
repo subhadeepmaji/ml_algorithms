@@ -68,14 +68,3 @@ class QueryTiler:
             tiling_cost[index] = max_likelihood
 
         return tiling_sequence[-1], non_model_query_tokens
-
-
-
-
-
-
-
-
-
-
-
