@@ -226,6 +226,30 @@ class WordModel:
         avg_sim = np.average(sims)
         return avg_sim if avg_sim > 0 else 0
 
+    def sequence_likelihood(self, sequence):
+        """
+        compute the likelihood that the model predicts existence of sequence
+        :param sequence: string , space separated list of words, ovv words will be
+         ignored
+        :return: probability of the existence of the sequence
+        """
+        words = set([word for word in sequence.split(" ") if self.model.vocab.has_key(word)])
+        likelihoods = []
+
+        # cannot compute the likelihood of single word sequences
+        if len(words) < 2:
+            logger.error("cannot compute the likelihood of single word sequences")
+            return 0
+
+        for word in words:
+            word_vec = self.model[word]
+            words.remove(word)
+            context_vec = np.average(np.array([self.model[w] for w in words]), axis=0)
+            likelihoods.append(1 / (1 + np.exp(-np.dot(word_vec, context_vec))))
+            words.add(word)
+
+        return np.min(likelihoods)
+
     def most_similar(self, words, count=10, include_stopwords=False,
                      stem=True):
         """

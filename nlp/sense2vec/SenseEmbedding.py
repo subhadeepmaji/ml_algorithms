@@ -1,6 +1,5 @@
 import logging
-import re
-from itertools import izip, chain
+from itertools import chain
 from multiprocessing import Pool, Manager
 
 import numpy as np
@@ -8,15 +7,12 @@ from enum import Enum
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 from practnlptools import tools
+from collections import defaultdict
 
 from nlp.embedding import WordEmbedding
-from nlp.relation_extraction.relation_util import utils as relation_util
-from nlp.sense2vec import CONJUNCTION, CARDINAL, ADJECTIVE, NOUN, VERB
+from nlp.sense2vec import sense_tokenize
 
 logger = logging.getLogger(__name__)
-
-SENT_RE = re.compile(r"([A-Z]*[^\.!?]*[\.!?])", re.M)
-TAG_RE = re.compile(r"<[^>]+>")
 
 
 class SenseEmbedding(WordEmbedding.WordModel):
@@ -24,17 +20,6 @@ class SenseEmbedding(WordEmbedding.WordModel):
         Implementation of Sense2Vec;  NP, VP and POS tag based embedding
         reference : http://arxiv.org/pdf/1511.06388v1.pdf
         """
-    class VPTags(Enum):
-        single = 'S-VP'
-        begin = 'B-VP'
-        intermediate = 'I-VP'
-        end = 'E-VP'
-
-    class NPTags(Enum):
-        single = 'S-NP'
-        begin = 'B-NP'
-        intermediate = 'I-NP'
-        end = 'E-NP'
 
     # DO NOT change this ordering, need to figure out a better way to achieve this
     senses = ['NOUN', 'VERB', 'ADJECTIVE', 'CONJUNCTION', 'CARDINAL', 'DEFAULT']
@@ -48,116 +33,25 @@ class SenseEmbedding(WordEmbedding.WordModel):
         WordEmbedding.WordModel.__init__(self, *args, **kwargs)
         self.sources = data_sources
         self.annotator = tools.Annotator()
-        self.phrase_tags = set([e.value for e in chain(*[SenseEmbedding.NPTags, SenseEmbedding.VPTags])])
         self.workers = workers
         self.tokenized_blocks = Manager().list()
         self.stemmer = PorterStemmer()
         self.stop_words = set(stopwords.words('english'))
+        self.word_to_tag = defaultdict(list)
 
-    @staticmethod
-    def __form_phrases(chunk_parse, sense):
+    def form_tag_tokens(self):
+        for word_tag in self.model.vocab:
+            word, tag = word_tag.split("|")
+            self.word_to_tag[word].append(tag)
 
-        if sense not in [SenseEmbedding.NPTags, SenseEmbedding.VPTags]:
-            raise RuntimeError("Sense must be NPTags or VPTags Enum")
+    def get_tags_for_word(self, word):
+        token_tags = self.word_to_tag.get(word, None)
+        if not token_tags: return None
+        return [word + "|" + tag for tag in token_tags]
 
-        current_sense, phrases = [], []
-        for word, chunk_tag in chunk_parse:
-            if chunk_tag == sense.single.value:
-                phrases.append(word)
-
-            if chunk_tag in [sense.begin.value, sense.intermediate.value]:
-                current_sense.append(word)
-
-            if chunk_tag == sense.end.value:
-                current_sense.append(word)
-                phrases.append(" ".join(current_sense))
-                current_sense = []
-
-        return phrases
-
-    @staticmethod
-    def normalize_pos(pos_tag):
-
-        if pos_tag in CONJUNCTION:
-            return 'CONJUNCTION'
-        elif pos_tag in CARDINAL:
-            return 'CARDINAL'
-        elif pos_tag in ADJECTIVE:
-            return 'ADJECTIVE'
-        elif pos_tag in NOUN:
-            return 'NOUN'
-        elif pos_tag in VERB:
-            return 'VERB'
-        else:
-            return 'DEFAULT'
-
-    def sense_tokenize(self, text_block):
-        """
-        tokenize a block into sentences which are word tokenized, preserving the sense of the words
-        (see the original paper for details)
-        :param text_block: block of text (string)
-        :return: list of sentences each tokenized into words
-        """
-        sentences = SENT_RE.findall(text_block)
-
-        for sentence in sentences:
-            sentence = sentence.replace('\'', '').replace('(', ' ')\
-                .replace(')', ' ').replace("/", " or ").replace("-", "")
-
-            sentence = TAG_RE.sub('', sentence)
-            sentence = "".join((c for c in sentence if 0 < ord(c) < 127))
-            logger.info("Will sense tokenize : %s" %sentence)
-            try:
-                senna_annotation = self.annotator.getAnnotations(sentence)
-            except Exception as e:
-                logger.error("annontator error")
-                logger.error(e)
-                continue
-
-            chunk_parse, pos_tags, words = senna_annotation['chunk'], senna_annotation['pos'], \
-                                           senna_annotation['words']
-
-            single_words = [self.stemmer.stem(word) + '|' + SenseEmbedding.normalize_pos(tag)
-                            for word, tag in pos_tags if word not in self.stop_words]
-            self.tokenized_blocks.append(single_words)
-
-            noun_phrases = SenseEmbedding.__form_phrases(chunk_parse, SenseEmbedding.NPTags)
-            verb_phrases = SenseEmbedding.__form_phrases(chunk_parse, SenseEmbedding.VPTags)
-
-            non_phrase_words = [self.stemmer.stem(word) + '|' + SenseEmbedding.normalize_pos(pos_tag) for
-                                ((word, chunk_tag), (_, pos_tag)) in izip(chunk_parse, pos_tags)
-                                if chunk_tag not in self.phrase_tags if word not in self.stop_words]
-
-            noun_entities, verb_entities = [], []
-            for np in noun_phrases:
-                en = relation_util.form_entity(words, np, chunk_parse, pos_tags, 'NP')
-                if not en: continue
-                noun_entities.append(en + '|NP')
-
-            for vp in verb_phrases:
-                en = relation_util.form_entity(words, vp, chunk_parse, pos_tags, 'VP')
-                if not en: continue
-                verb_entities.append(en + '|VP')
-
-            noun_index, verb_index, non_phrase_index = 0,0,0
-            sense_words = []
-            for (word, chunk_tag) in chunk_parse:
-                if chunk_tag not in self.phrase_tags:
-                    if non_phrase_index < len(non_phrase_words):
-                        sense_words.append(non_phrase_words[non_phrase_index])
-                        non_phrase_index += 1
-
-                if chunk_tag in [SenseEmbedding.NPTags.end.value, SenseEmbedding.NPTags.single.value]:
-                    if noun_index < len(noun_entities):
-                        sense_words.append(noun_entities[noun_index])
-                        noun_index += 1
-
-                if chunk_tag in [SenseEmbedding.VPTags.end.value, SenseEmbedding.VPTags.single.value]:
-                    if verb_index < len(verb_entities):
-                        sense_words.append(verb_entities[verb_index])
-                        verb_index += 1
-
-            if sense_words: self.tokenized_blocks.append(sense_words)
+    def tokenize(self, text_block):
+        sense_phrases = sense_tokenize(text_block, self.annotator, self.stemmer, self.stop_words)
+        self.tokenized_blocks.extend(sense_phrases)
 
     def get_sense_vec(self, entity, dimension, sense='NOUN'):
 
@@ -223,7 +117,9 @@ class SenseEmbedding(WordEmbedding.WordModel):
         logger.info("will sentence and word tokenize the text blocks")
 
         pool = Pool(processes=self.workers)
-        pool.map(self.sense_tokenize, text_blocks,chunksize=2*self.workers)
+        pool.map(self.tokenize, text_blocks,chunksize=2*self.workers)
         pool.close()
         pool.join()
         self.batch_train(text_blocks=self.tokenized_blocks, tokenized=True)
+        # form the token to tags map
+        self.form_tag_tokens()
