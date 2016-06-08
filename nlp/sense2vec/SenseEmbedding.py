@@ -46,7 +46,7 @@ class SenseEmbedding(WordEmbedding.WordModel):
 
     def get_tags_for_word(self, word):
         token_tags = self.word_to_tag.get(word, None)
-        if not token_tags: return None
+        if not token_tags: return []
         return [word + "|" + tag for tag in token_tags]
 
     def tokenize(self, text_block):
@@ -108,9 +108,9 @@ class SenseEmbedding(WordEmbedding.WordModel):
                 logger.warn("item read from source is empty")
                 continue
 
-            for item in item_tuple:
-                if item == '': continue
-                text_blocks.append(item)
+            item = " ".join([t[1] for t in item_tuple])
+            if item == '': continue
+            text_blocks.append(item)
 
         logger.info("Read all the text blocks")
         logger.info("Number of text blocks read : %d" % len(text_blocks))

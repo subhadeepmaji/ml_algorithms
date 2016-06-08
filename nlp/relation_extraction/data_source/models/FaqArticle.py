@@ -6,6 +6,11 @@ db_alias = 'faq'
 collection_name = 'faq'
 relation_fields = ['answer', 'question']
 
+field_weights = {
+    'answer' : 2,
+    'question': 1
+}
+
 
 class FaqArticle(Document):
     question = StringField(required=True)

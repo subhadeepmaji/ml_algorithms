@@ -6,6 +6,11 @@ db_alias = 'article'
 collection_name = 'article'
 relation_fields = ['title', 'body']
 
+field_weights = {
+    'body': 2,
+    'title': 1
+}
+
 
 class Article(Document):
     title = StringField(required=True)

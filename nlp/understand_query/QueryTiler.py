@@ -13,8 +13,9 @@ class QueryTiler:
 
     def __tile_single_token(self, token):
         words = self.embedding.get_tags_for_word(token)
-        words = [w for w in words if w.split("|")[1] in self.embedding.senses]
-        labels = [(w, self.embedding.model.most_similar(w, topn=1)[0][1]) for w in words]
+        words_single_sense = [w for w in words if w.split("|")[1] in self.embedding.senses]
+        labels = [(w, self.embedding.model.most_similar(w, topn=1)[0][1]) for w in words_single_sense]
+        if not labels: return None
         return max(labels, key=lambda e: e[1])[0]
 
     def tile(self, query, include_stopwords=False):
@@ -26,9 +27,17 @@ class QueryTiler:
         model_query_tokens = [w for w in query_tokens if self.embedding.get_tags_for_word(w)]
         non_model_query_tokens = list(set(query_tokens).difference(set(model_query_tokens)))
 
+        first_index = 0
+        for index, token in enumerate(model_query_tokens):
+            seq_zero_label = [self.__tile_single_token(token)]
+            if seq_zero_label[0]: break
+            else : first_index += 1
+
+        model_query_tokens = model_query_tokens[first_index:]
         tiling_sequence, tiling_cost = [None] * len(model_query_tokens), [-1] * len(model_query_tokens)
+
         tiling_cost[0] = 0
-        tiling_sequence[0] = [self.__tile_single_token(model_query_tokens[0])]
+        tiling_sequence[0] = seq_zero_label
 
         for index, word in enumerate(model_query_tokens[1:]):
             index += 1
@@ -57,14 +66,17 @@ class QueryTiler:
                     max_likelihood = tiling_likelihood if tiling_likelihood > max_likelihood \
                         else max_likelihood
                     best_label = phrase_tag if max_likelihood == tiling_likelihood else best_label
-                    best_index = j - 1
+                    best_index = j - 1 if max_likelihood == tiling_likelihood else best_index
 
-            if best_index:
-                tiling_sequence[index] = list(tiling_sequence[best_index])
+            print best_index, best_label
+            if best_index is not None:
+                tiling_sequence[index] = list(tiling_sequence[best_index]) \
+                    if best_index >= 0 else list()
             else:
                 tiling_sequence[index] = list(tiling_sequence[index - 1])
 
             tiling_sequence[index].append(best_label)
             tiling_cost[index] = max_likelihood
 
+        print tiling_sequence
         return tiling_sequence[-1], non_model_query_tokens

@@ -91,8 +91,13 @@ class MongoDataSource:
         try:
             item = self.items.next()
             data_field_values = []
+
             for f in self.model_identifier.fields:
-                data_field_values.append(item[f])
+                field_value = item[f]
+                if field_value[-1] not in ['.', '?']:
+                    field_value += '.'
+                data_field_values.append((f, field_value))
+
             return tuple(data_field_values)
 
         except StopIteration as e:
