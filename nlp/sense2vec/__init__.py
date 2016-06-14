@@ -2,6 +2,7 @@ import logging, re
 from itertools import chain, izip
 from util import LoggerConfig
 from enum import Enum
+from nltk import word_tokenize as tokenizer
 from nlp.relation_extraction.relation_util import utils as relation_util
 
 
@@ -36,6 +37,7 @@ class NPTags(Enum):
     end = 'E-NP'
 
 phrase_tags = set([e.value for e in chain(*[NPTags, VPTags])])
+alpha_numeric = re.compile('^\w+$')
 
 
 def form_phrases(chunk_parse, sense):
@@ -75,6 +77,22 @@ def normalize_pos(pos_tag):
         return 'DEFAULT'
 
 
+def word_tokenize(text_block, stemmer, stop_words):
+    sentences = SENT_RE.findall(text_block)
+    sense_phrases = []
+    for sentence in sentences:
+        sentence = sentence.replace('\'', '').replace('(', ' ') \
+            .replace(')', ' ').replace("/", " or ").replace("-", "")
+
+        sentence = TAG_RE.sub('', sentence)
+        sentence = "".join((c for c in sentence if 0 < ord(c) < 127))
+        sentence_words = [stemmer.stem(word) for word in tokenizer(sentence) if word not in stop_words
+                          and re.match(alpha_numeric, word)]
+        sense_phrases.append(sentence_words)
+        logger.info("Will sense tokenize : %s" % sentence)
+    return sense_phrases
+
+
 def sense_tokenize(text_block, annotator, stemmer, stop_words):
     """
     tokenize a block into sentences which are word tokenized, preserving the sense of the words
@@ -95,12 +113,12 @@ def sense_tokenize(text_block, annotator, stemmer, stop_words):
 
         sentence = TAG_RE.sub('', sentence)
         sentence = "".join((c for c in sentence if 0 < ord(c) < 127))
-        logger.info("Will sense tokenize : %s" % sentence)
+        #logger.info("Will sense tokenize : %s" % sentence)
         try:
             senna_annotation = annotator.getAnnotations(sentence)
         except Exception as e:
-            logger.error("annontator error")
-            logger.error(e)
+            #logger.error("annontator error")
+            #logger.error(e)
             continue
 
         chunk_parse, pos_tags, words = senna_annotation['chunk'], senna_annotation['pos'], \

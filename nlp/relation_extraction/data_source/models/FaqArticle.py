@@ -4,7 +4,7 @@ from mongoengine import StringField
 db_name = 'faq'
 db_alias = 'faq'
 collection_name = 'faq'
-relation_fields = ['answer', 'question']
+relation_fields = ['question', 'answer']
 
 field_weights = {
     'answer' : 2,

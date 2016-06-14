@@ -10,7 +10,8 @@ from practnlptools import tools
 from collections import defaultdict
 
 from nlp.embedding import WordEmbedding
-from nlp.sense2vec import sense_tokenize
+from nlp.sense2vec import sense_tokenize, word_tokenize
+
 
 logger = logging.getLogger(__name__)
 

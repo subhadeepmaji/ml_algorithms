@@ -3,6 +3,7 @@ import logging
 import random
 
 import numpy as np
+import scipy as sp
 import theano
 import theano.tensor as T
 from itertools import izip
@@ -764,6 +765,59 @@ class TransHEmbedding:
                           for l_index, candidate in enumerate(self.Entity.get_value().T)]
             candidates = sorted(candidates, key=lambda e: e[1])
             return [(self.entity_reverse_indices[index], score) for index, score in candidates[:topn]]
+
+
+    def kernel_density(self, xi, xj, std = 1):
+        """
+        compute the kernel density metric distance between the relation triples
+        xi and xj
+        :param xi: (l,r,h) of the triple
+        :param xj: (l,r,h) of the triple
+        :param std : standard deviation of the Gaussian
+        :return: kernel density distance between the two triples
+        """
+        (le_i, rel_i, re_i) = xi
+        (le_j, rel_j, re_j) = xj
+
+        (li_index, ri_index, hi_index) = self.entity_indices[le_i], self.relation_indices[rel_i], \
+                                         self.entity_indices[re_i]
+        (lj_index, rj_index, hj_index) = self.entity_indices[le_j], self.relation_indices[rel_j], \
+                                         self.entity_indices[re_j]
+
+        li = self.Entity.get_value()[:, li_index]
+        lj = self.Entity.get_value()[:, lj_index]
+        hi = self.Entity.get_value()[:, hi_index]
+        hj = self.Entity.get_value()[:, hj_index]
+
+        ri_normal = self.RelationNormal.get_value()[:,ri_index]
+        rj_normal = self.RelationNormal.get_value()[:, rj_index]
+        ri = self.Relation.get_value()[:,ri_index]
+        rj = self.Relation.get_value()[:,rj_index]
+
+        li_plane = li - np.dot(ri_normal, li) * ri_normal
+        lj_plane = lj - np.dot(rj_normal, lj) * rj_normal
+        hi_plane = hi - np.dot(ri_normal, hi) * ri_normal
+        hj_plane = hj - np.dot(rj_normal, hj) * rj_normal
+
+        return np.exp(-(np.linalg.norm(li_plane - lj_plane, ord=2) ** 2
+                        + np.linalg.norm(hi_plane - hj_plane, ord=2) ** 2
+                        + np.linalg.norm(ri_normal - rj_normal, ord=2) ** 2) /
+                      2 * (std ** 2)) / (2 * np.pi * std)
+
+
+    def nearest_neighbours(self, triple, topn=10):
+        """
+        compute the nearest topn neibhours of the relation triple
+        :param triple: (l, r, h) of the relation triple
+        :return: topn nearest neighbours of the relation triple
+        """
+        distances = []
+        for neighbour in self.kb_triples:
+            neighbour = neighbour.left_entity, neighbour.relation, neighbour.right_entity
+            distance = self.kernel_density(triple, neighbour)
+            distances.append((neighbour, distance))
+
+        return sorted(distances, key=lambda e : -e[1])[:topn]
 
 
 
