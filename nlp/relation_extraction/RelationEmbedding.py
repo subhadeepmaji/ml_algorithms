@@ -9,12 +9,16 @@ import theano.tensor as T
 from itertools import izip
 from gensim.models.word2vec import Word2Vec
 from theano.ifelse import ifelse
+import multiprocessing as mlp
+from collections import defaultdict
 
 from nlp.relation_extraction import RelationTuple
 from nlp.sense2vec import SenseEmbedding as SE
 
 logger = logging.getLogger(__name__)
 
+
+query_pool = mlp.Pool(mlp.cpu_count())
 
 class BengioEmbedding:
 
@@ -499,6 +503,8 @@ class TransHEmbedding:
         self.lower_bound = -6 / np.sqrt(self.dimension)
         self.upper_bound = 6 / np.sqrt(self.dimension)
         self.__inited, self.__has_model = False, False
+        self.left_entity_relation = defaultdict(list)
+        self.right_entity_relation = defaultdict(list)
         self.param_value_new, self.param_value_old = False, False
 
     def form_vec(self, entity, embedding, sense='NOUN'):
@@ -529,6 +535,9 @@ class TransHEmbedding:
             entities.add(l_entity)
             entities.add(r_entity)
             relations.add(relation)
+
+            self.left_entity_relation[(l_entity, relation)].append(knowledge_tuple)
+            self.right_entity_relation[(r_entity, relation)].append(knowledge_tuple)
 
         entities = list(entities)
         relations = list(relations)
@@ -718,6 +727,16 @@ class TransHEmbedding:
             self.param_value_new = [p.get_value() for p in self.params]
             epochs += 1
 
+    def form_relation_similarity(self):
+
+        num_relation = len(self.relation_indices)
+        self.relation_similarity = np.ndarray(shape=(num_relation, num_relation), dtype=np.float)
+        for relation, rel_index in self.relation_indices.iteritems():
+            rel_vec = self.RelationNormal.get_value()[:, rel_index]
+            sims = [(index, sp.spatial.distance.cosine(rel_vec, self.RelationNormal.get_value()[:,index]))
+                    for index in self.relation_indices.values()]
+            self.relation_similarity[rel_index, [s[0] for s in sims]] = [s[1] for s in sims]
+
     def predict(self, left_entity=None, right_entity=None, relation=None, topn=10):
         """
         predict the completion for a partial triple, supported
@@ -750,32 +769,55 @@ class TransHEmbedding:
 
         # complete the right entity of the relation
         if left_entity and relation:
-            l_index = self.entity_indices[left_entity]
-            rel_index = self.relation_indices[relation]
-            candidates = [(r_index, self.__compute_objective([l_index, r_index, rel_index]))
-                          for r_index, candidate in enumerate(self.Entity.get_value().T)]
-            candidates = sorted(candidates, key=lambda e: e[1])
-            return [(self.entity_reverse_indices[index], score) for index, score in candidates[:topn]]
+
+            candidates = ((left_entity, relation, right_entity) for right_entity in self.entity_indices.keys())
+            candidates = query_pool.map(self.kernel_density_estimate, candidates)
+            #candidates = [((left_entity, relation, right_entity),
+            #               self.kernel_density_estimate((left_entity, relation, right_entity)))
+            #              for right_entity in self.entity_indices.keys()]
+
+            candidates = sorted(candidates, key=lambda e: -e[1])
+            return candidates[:topn]
 
         # complete the left entity of the relation
         if right_entity and relation:
-            r_index = self.entity_indices[right_entity]
-            rel_index = self.relation_indices[relation]
-            candidates = [(l_index, self.__compute_objective([l_index, r_index, rel_index]))
-                          for l_index, candidate in enumerate(self.Entity.get_value().T)]
-            candidates = sorted(candidates, key=lambda e: e[1])
-            return [(self.entity_reverse_indices[index], score) for index, score in candidates[:topn]]
+            candidates = ((left_entity, relation, right_entity) for left_entity in self.entity_indices.keys())
+            candidates = query_pool.map(self.kernel_density_estimate, candidates)
 
+            #candidates = [(l_index, self.__compute_objective([l_index, r_index, rel_index]))
+            #              for l_index, candidate in enumerate(self.Entity.get_value().T)]
+            candidates = sorted(candidates, key=lambda e: -e[1])
+            return candidates[:topn]
 
-    def kernel_density(self, xi, xj, std = 1):
+    def kernel_density_estimate(self, x, std = 1):
+        """
+        compute the kernel density estimate for a triple
+        :param xi: (l, r, h) of the relation triple
+        :param std: standard deviation of the Gaussian Kernel
+        :return: Density estimate for the relation triple
+        """
+        density = 0
+        (l_e, rel, r_e) = x
+        triples = self.left_entity_relation[(l_e, rel)]
+        triples.extend(self.left_entity_relation[(r_e, rel)])
+
+        if not triples:
+            return x, 0.0
+
+        for triple in triples:
+            triple = triple.left_entity, triple.relation, triple.right_entity
+            density += self.kernel_density_pair(x, triple, std=std)
+        return x, density / len(triples)
+
+    def kernel_density_pair(self, x_pair, std = 1):
         """
         compute the kernel density metric distance between the relation triples
         xi and xj
-        :param xi: (l,r,h) of the triple
-        :param xj: (l,r,h) of the triple
-        :param std : standard deviation of the Gaussian
+        :param x_pair: ((l1,r1,h1), (l2, r2, h2)) of the triple
+        :param std : standard deviation of the Gaussian Kernel
         :return: kernel density distance between the two triples
         """
+        xi, xj = x_pair
         (le_i, rel_i, re_i) = xi
         (le_j, rel_j, re_j) = xj
 
@@ -791,17 +833,24 @@ class TransHEmbedding:
 
         ri_normal = self.RelationNormal.get_value()[:,ri_index]
         rj_normal = self.RelationNormal.get_value()[:, rj_index]
+
+        #rj_normal = np.dot(rj_normal, ri_normal) * ri_normal / np.linalg.norm(ri_normal, ord=2)
         ri = self.Relation.get_value()[:,ri_index]
         rj = self.Relation.get_value()[:,rj_index]
 
-        li_plane = li - np.dot(ri_normal, li) * ri_normal
-        lj_plane = lj - np.dot(rj_normal, lj) * rj_normal
-        hi_plane = hi - np.dot(ri_normal, hi) * ri_normal
-        hj_plane = hj - np.dot(rj_normal, hj) * rj_normal
+        li_plane = li - (np.dot(ri_normal, li) * ri_normal)
+        lj_plane = lj - (np.dot(rj_normal, lj) * rj_normal)
+        hi_plane = hi - (np.dot(ri_normal, hi) * ri_normal)
+        hj_plane = hj - (np.dot(rj_normal, hj) * rj_normal)
 
-        return np.exp(-(np.linalg.norm(li_plane - lj_plane, ord=2) ** 2
+        #return np.exp(-(sp.spatial.distance.cosine(li_plane, lj_plane) ** 2
+        #              + sp.spatial.distance.cosine(hi_plane, hj_plane) ** 2)
+        #              / 2 * (std ** 2)) / (2 * np.pi * std)
+
+        return xi, xj, np.exp(-(np.linalg.norm(li_plane - lj_plane, ord=2) ** 2
                         + np.linalg.norm(hi_plane - hj_plane, ord=2) ** 2
-                        + np.linalg.norm(ri_normal - rj_normal, ord=2) ** 2) /
+                        + np.linalg.norm(ri - rj, ord=2)
+                        + max(np.linalg.norm(li - lj, ord=2), np.linalg.norm(hi - hj, ord=2))) /
                       2 * (std ** 2)) / (2 * np.pi * std)
 
 
@@ -811,13 +860,13 @@ class TransHEmbedding:
         :param triple: (l, r, h) of the relation triple
         :return: topn nearest neighbours of the relation triple
         """
-        distances = []
-        for neighbour in self.kb_triples:
-            neighbour = neighbour.left_entity, neighbour.relation, neighbour.right_entity
-            distance = self.kernel_density(triple, neighbour)
-            distances.append((neighbour, distance))
+        pairs = ((triple, (neighbour.left_entity, neighbour.relation, neighbour.right_entity))
+                 for neighbour in self.kb_triples)
 
-        return sorted(distances, key=lambda e : -e[1])[:topn]
+        distances = query_pool.map(self.kernel_density_pair, pairs)
+        candidates = sorted(distances, key=lambda e : -e[2])[:2 * topn]
+        candidates = {e[1] : e[2] for e in candidates}
+        return sorted(candidates.iteritems(), key=lambda e:-e[1])[:topn]
 
 
 
