@@ -2,7 +2,7 @@ from __future__ import division
 
 import sys, re
 import logging
-from multiprocessing import Pool
+import multiprocessing as mlp
 from collections import Counter
 from itertools import chain
 import numpy as np
@@ -11,12 +11,14 @@ from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 from practnlptools import tools
 from hashlib import sha256
-from pyemd import emd
+from collections import defaultdict
 
-from nlp.sense2vec import sense_tokenize, word_tokenize
+from nlp.sense2vec import sense_tokenize
 from nlp.sense2vec import SenseEmbedding as SE
 from nlp.understand_query import QueryTiler as QT
+from nlp.relation_extraction import RelationEmbedding as RE
 from sklearn.metrics.pairwise import euclidean_distances
+
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,8 @@ reload(sys)
 sys.setdefaultencoding('utf8')
 
 alpha_numeric = re.compile('^[\s\w]+$')
+
+query_pool = mlp.Pool(mlp.cpu_count())
 
 class WordMoverModel:
     """
@@ -33,7 +37,7 @@ class WordMoverModel:
 
     reference : http://jmlr.org/proceedings/papers/v37/kusnerb15.pdf
     """
-    def __init__(self, data_source, workers, embedding, alpha=0.7):
+    def __init__(self, data_source, workers, embedding, alpha=0.8):
         self.source = data_source
         self.workers = workers
         self.tokenized_blocks = None
@@ -49,7 +53,7 @@ class WordMoverModel:
     def tokenize(self, block_input):
         block_id, text_block = block_input
         sense_phrases = sense_tokenize(text_block, self.annotator, self.stemmer, self.stop_words)
-        return (block_id, sense_phrases, text_block)
+        return block_id, sense_phrases, text_block
 
     def _filter_word(self, word_sense):
         word = word_sense.split("|")[0]
@@ -123,32 +127,22 @@ class WordMoverModel:
         """
         if not tiled:
             tiled_words = self.query_tiler.tile(query, include_stopwords=False)[0]
-            #tiled_words = word_tokenize(query, self.stemmer, self.stop_words)[0]
         else:
             tiled_words = query
 
         if not tiled_words: raise RuntimeError("query could not be tiled by the embedding model")
         tiled_words = [w for w in tiled_words if self.vocab.has_key(w)]
         query_weights = [1] * len(tiled_words)
-        query_expansion = [(w,s) for w,s in self.embedding.model.most_similar(tiled_words)
-                          if self.vocab.has_key(w)][:5]
+        #query_expansion = [(w,s) for w,s in self.embedding.model.most_similar(tiled_words)
+        #                  if self.vocab.has_key(w)][:5]
 
-        tiled_words.extend([s[0] for s in query_expansion])
-        query_weights.extend([s[1] for s in query_expansion])
+        #tiled_words.extend([s[0] for s in query_expansion])
+        #query_weights.extend([s[1] for s in query_expansion])
 
-        #uniq_query_tokens = Counter(tiled_words)
-        #token_counts = [uniq_query_tokens[t] / len(tiled_words) for t in tiled_words]
         candidates = [(block_id, tiled_words, doc_words, query_weights) for block_id, (doc_words, _)
                       in self.document_models.iteritems()]
         #pool = Pool(processes=4)
         neighbours = map(self.assign_nearest_nbh, candidates)
-        #pool.close()
-        #pool.join()
-        #for block_id, (sense_words, block) in self.document_models.iteritems():
-        #    distance = self.__assign_nearest_nbh(block_id, tiled_words, sense_words)
-        #    if distance < 40: print "-----------------", block
-        #    neighbours.append((block_id, block, distance))
-
         neighbours = sorted(neighbours, key=lambda e: e[1])
         return neighbours[:topn]
 
@@ -174,11 +168,61 @@ class WordMoverModel:
         logger.info("Number of text blocks read : %d" % len(text_blocks))
         logger.info("will sentence and word tokenize the text blocks")
 
-        pool = Pool(processes=self.workers)
+        pool = mlp.Pool(4)
         self.tokenized_blocks = pool.map(self.tokenize, text_blocks, chunksize=self.workers)
         pool.close()
         pool.join()
         self.form_doc_bags()
+
+
+class WordMoverModelRelation:
+    """
+    word mover model for document retrieval on approx EMD computation of
+    relation embedding distances of query and documents
+    """
+    def __init__(self, relation_blocks, relation_embedding):
+        self.relation_blocks = relation_blocks
+        assert isinstance(relation_embedding, RE.TransHEmbedding), "relation embedding must be an instance " \
+                                                                   "of TransHEmbedding"
+        self.relation_embedding = relation_embedding
+        self.relation_by_doc = defaultdict(list)
+        self.doc_text = {}
+
+    def form_doc_relations(self):
+        for relation in self.relation_blocks:
+            self.relation_by_doc[relation.block_id].append((relation.left_entity, relation.relation,
+                                                            relation.right_entity))
+            self.doc_text[relation.block_id] = relation.text
+
+    def compute_word_mover(self, query):
+        block_id, query_relations, block_relations = query
+
+        kernel_densities = np.array([[self.relation_embedding.kernel_density_pair((query_relation, block_relation))[2]
+                     for block_relation in block_relations] for query_relation in query_relations])
+        label_assignment = np.argmax(kernel_densities, axis=1)
+        label_assignment = [(index, l) for index, l in enumerate(label_assignment)]
+        densities = [kernel_densities[(i, e)] for i, e in label_assignment]
+        return block_id, 0.5 * np.sum(densities) + 0.5 * np.sum(kernel_densities)
+
+    def compute_nearest_docs(self, query, topn=10):
+
+        candidates = [(block_id, query, block_relations) for block_id, block_relations
+                      in self.relation_by_doc.iteritems()]
+
+        density_by_doc = query_pool.map(self.compute_word_mover, candidates)
+        density_by_doc = sorted(density_by_doc, key=lambda e: -e[1])[:topn]
+        nearest_docs = [(block_id, score, self.doc_text[block_id]) for block_id, score in density_by_doc]
+        return nearest_docs
+
+
+
+
+
+
+
+
+
+
 
 
 

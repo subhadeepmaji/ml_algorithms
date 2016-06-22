@@ -10,7 +10,9 @@ class Relation(DocType):
     leftEntity = String(analyzer='snowball')
     rightEntity = String(analyzer='snowball')
     relation = String(analyzer='snowball')
+    sentence = String(index='not_analyzed')
     text = String(index='not_analyzed')
+    block_id = String(index='not_analyzed')
 
     createdAt = Date()
 

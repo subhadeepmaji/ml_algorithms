@@ -3,6 +3,7 @@ import time
 from multiprocessing import Pool, Manager
 from threading import Thread
 
+import uuid
 import pattern.en as pattern
 from nltk.stem import PorterStemmer
 from practnlptools import tools as pnt
@@ -19,7 +20,7 @@ class RelationExtractor:
     """
     Relation Extraction based on Semantic Role Labeling of SENNA
     """
-    def __init__(self, data_source=None, relation_sink=None, workers=8):
+    def __init__(self, data_source=None, relation_sink=None, workers=4):
         """
         :param data_source: data_source object of type DataSource
         :param relation_sink: data_sink object of type DataSink
@@ -73,11 +74,12 @@ class RelationExtractor:
                                 EXT=semantic_element.get('AM-EXT'), PNC=semantic_element.get('AM-PNC'),
                                 CAU=semantic_element.get('AM-CAU'), NEG=semantic_element.get('AM-NEG'))
 
-    def form_relations(self, text, persist=True):
+    def form_relations(self, text, block_id, persist=True):
         """
         form relation(s) on a given text
         :param text: text on which to get the relations on,
         text will be sentence tokenized and relations formed at sentence level
+        :param block_id: unique identifier of the block
         :param persist: persist the relations extracted from the text in the sink,
         relation_sink needed to be specified
         :return: list of relations
@@ -115,7 +117,7 @@ class RelationExtractor:
                     en1 = relation_util.form_entity(tokenized_sentence, a1, chunk_parse, pos_tags)
                     if not en0 or not en1: continue
                     relations.append(RelationTuple(left_entity=en0, right_entity=en1, relation=verb,
-                                                   sentence=sentence))
+                                                   sentence=sentence, text=text, block_id=block_id))
                 for arg_modifier in modifiers:
                     mod_pos = sentence.find(arg_modifier)
                     linked_arg = min([(a, abs(mod_pos - sentence.find(a))) for a in arguments], key=lambda e: e[1])[0]
@@ -123,7 +125,7 @@ class RelationExtractor:
                     en1 = relation_util.form_entity(tokenized_sentence, arg_modifier, chunk_parse, pos_tags)
                     if not en0 or not en1: continue
                     relations.append(RelationTuple(left_entity=en0, right_entity=en1, relation=verb,
-                                                   sentence=sentence))
+                                                   sentence=sentence, text=text, block_id=block_id))
 
         return relations
 
@@ -132,28 +134,34 @@ class RelationExtractor:
             logger.error("got an empty source item")
             return
 
-        for item_entry in source_item:
-            if item_entry == ' ': continue
+        item_entry = ""
+        for f_name, f_value in source_item:
+            item_entry += f_value
+
+        if item_entry == ' ': return
+        try:
+            block_id = str(uuid.uuid1())
+            relations = self.form_relations(item_entry, block_id)
+        except RuntimeError as e:
+            logger.error("Error generating relations")
+            logger.error(e)
+            return
+
+        for relation in relations:
+            sink_relation = self.model_class()
+            sink_relation.leftEntity = relation.left_entity
+            sink_relation.rightEntity = relation.right_entity
+            sink_relation.relation = relation.relation
+            sink_relation.sentence = relation.sentence
+            sink_relation.text = relation.text
+            sink_relation.block_id = relation.block_id
+            logger.info("generated a relation")
+            logger.info(sink_relation)
+
             try:
-                relations = self.form_relations(item_entry)
-            except RuntimeError as e:
-                logger.error("Error generating relations")
+                self.relation_queue.put(sink_relation, timeout=1)
+            except Full as e:
                 logger.error(e)
-                continue
-
-            for relation in relations:
-                sink_relation = self.model_class()
-                sink_relation.leftEntity = relation.left_entity
-                sink_relation.rightEntity = relation.right_entity
-                sink_relation.relation = relation.relation
-                sink_relation.text = relation.sentence
-                logger.info("generated a relation")
-                logger.info(sink_relation)
-
-                try:
-                    self.relation_queue.put(sink_relation, timeout=1)
-                except Full as e:
-                    logger.error(e)
 
     def sink_relations(self):
         while not self.all_sinked:
@@ -174,7 +182,7 @@ class RelationExtractor:
         self.all_sinked = False
         pool = Pool(processes=self.workers)
         t1 = time.time()
-        pool.imap(self.form_relations_source, self.data_source, chunksize=8)
+        pool.imap(self.form_relations_source, self.data_source)
 
         sinker = Thread(target=self.sink_relations, name='Sink-Thread')
         sinker.start()
