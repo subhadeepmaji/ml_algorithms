@@ -6,7 +6,7 @@ import numpy as np
 import scipy as sp
 import theano
 import theano.tensor as T
-from itertools import izip
+from itertools import izip, chain
 from gensim.models.word2vec import Word2Vec
 from theano.ifelse import ifelse
 import multiprocessing as mlp
@@ -730,17 +730,34 @@ class TransHEmbedding:
 
         self.form_relation_normalization()
 
-    def form_relation_normalization(self):
+    def normalize_relations(self):
         relation_counts = defaultdict(int)
+        entity_counts = defaultdict(int)
+        entity_epsilon = 1e-4
+
         for triple in self.kb_triples:
             relation_counts[triple.relation] += 1
+            entity_counts[triple.left_entity] += 1
+            entity_counts[triple.right_entity] += 1
+            for entity in chain(triple.left_entity.split(" "), triple.right_entity.split(" ")):
+                entity_counts[entity] += 1
 
         max_relation_count = max(relation_counts.values())
         min_relation_count = min(relation_counts.values())
         normalize_factor = max_relation_count - min_relation_count
+        num_triples = len(self.kb_triples)
 
         self.relation_norm_factor = {rel : np.exp(-(count - min_relation_count) / (normalize_factor))
                                      for rel, count in relation_counts.iteritems()}
+
+        self.entity_idf = {entity : np.log(num_triples / count) for entity, count
+                           in entity_counts.iteritems()}
+
+        max_idf = max(self.entity_idf.values())
+        min_idf = min(self.entity_idf.values())
+        normalize_factor = max_idf - min_idf
+        self.entity_idf = {entity : (idf - min_idf + entity_epsilon) / normalize_factor for entity, idf
+                           in self.entity_idf.iteritems()}
 
     def predict(self, left_entity=None, right_entity=None, relation=None, topn=10):
         """
@@ -859,11 +876,15 @@ class TransHEmbedding:
         hj_plane = hj - (np.dot(rj_normal, hj) * rj_normal)
 
         relation_norm_factor = self.relation_norm_factor[rel_i]
-        return xi, xj, np.exp(-(sp.spatial.distance.cosine(li_plane,lj_plane)
-                        + sp.spatial.distance.cosine(hi_plane,hj_plane)
-                                + relation_norm_factor * sp.spatial.distance.cosine(ri_normal, rj_normal))
-                              / 2 * (std ** 2)) / (2 * np.pi * std)
+        left_entity_idf = self.entity_idf[le_i]
+        right_entity_idf = self.entity_idf[re_i]
 
+        entity_density_estimate = left_entity_idf * sp.spatial.distance.cosine(li_plane,lj_plane) \
+                                  + right_entity_idf * sp.spatial.distance.cosine(hi_plane,hj_plane)
+        relation_density_estimate = relation_norm_factor * sp.spatial.distance.cosine(ri_normal, rj_normal)
+        weight_factor = 2 * (left_entity_idf + right_entity_idf) / relation_norm_factor
+        return xi, xj, np.exp(-(weight_factor * entity_density_estimate + relation_density_estimate)
+                              / 2 * (std ** 2)) / (2 * np.pi * std)
 
     def nearest_neighbours(self, triples, topn=10):
         """
