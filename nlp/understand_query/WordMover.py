@@ -267,7 +267,7 @@ class WordMoverModelRelation:
         label_assignment = [(index, l) for index, l in enumerate(label_assignment)]
         densities = [kernel_densities[(i, e)] for i, e in label_assignment]
 
-        return block_id, 0.5 * np.sum(densities) + 0.4 * affinity
+        return block_id, 0.6 * np.sum(densities) + 0.4 * affinity
 
     def compute_nearest_docs(self, query, topn=10):
 
