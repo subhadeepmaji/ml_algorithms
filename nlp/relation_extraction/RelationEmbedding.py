@@ -17,9 +17,17 @@ from nlp.relation_extraction import RelationTuple
 from nlp.sense2vec import SenseEmbedding as SE
 
 logger = logging.getLogger(__name__)
+has_pool = False
+module_pool = None
 
 
-query_pool = mlp.Pool(mlp.cpu_count())
+def get_pool():
+    global module_pool
+    if has_pool:
+        return module_pool
+    query_pool = mlp.Pool(mlp.cpu_count())
+    module_pool = query_pool
+    return module_pool
 
 class BengioEmbedding:
 
@@ -504,8 +512,13 @@ class TransHEmbedding:
         self.lower_bound = -6 / np.sqrt(self.dimension)
         self.upper_bound = 6 / np.sqrt(self.dimension)
         self.__inited, self.__has_model = False, False
+
         self.left_entity_relation = defaultdict(list)
         self.right_entity_relation = defaultdict(list)
+        self.left_entity_triples = defaultdict(list)
+        self.right_entity_triples = defaultdict(list)
+        self.relation_triples = defaultdict(list)
+
         self.param_value_new, self.param_value_old = False, False
 
     def form_vec(self, entity, embedding, sense='NOUN'):
@@ -539,6 +552,9 @@ class TransHEmbedding:
 
             self.left_entity_relation[(l_entity, relation)].append(knowledge_tuple)
             self.right_entity_relation[(r_entity, relation)].append(knowledge_tuple)
+            self.left_entity_triples[l_entity].append(knowledge_tuple)
+            self.right_entity_triples[r_entity].append(knowledge_tuple)
+            self.relation_triples[relation].append(knowledge_tuple)
 
         entities = list(entities)
         relations = list(relations)
@@ -727,8 +743,7 @@ class TransHEmbedding:
             self.model(training_batch)
             self.param_value_new = [p.get_value() for p in self.params]
             epochs += 1
-
-        self.form_relation_normalization()
+        self.normalize_relations()
 
     def normalize_relations(self):
         relation_counts = defaultdict(int)
@@ -793,7 +808,7 @@ class TransHEmbedding:
         if left_entity and relation:
 
             candidates = ((left_entity, relation, right_entity) for right_entity in self.entity_indices.keys())
-            candidates = query_pool.map(self.kernel_density_estimate, candidates)
+            candidates = get_pool().map(self.kernel_density_estimate, candidates)
             #candidates = [((left_entity, relation, right_entity),
             #               self.kernel_density_estimate((left_entity, relation, right_entity)))
             #              for right_entity in self.entity_indices.keys()]
@@ -804,7 +819,7 @@ class TransHEmbedding:
         # complete the left entity of the relation
         if right_entity and relation:
             candidates = ((left_entity, relation, right_entity) for left_entity in self.entity_indices.keys())
-            candidates = query_pool.map(self.kernel_density_estimate, candidates)
+            candidates = get_pool().map(self.kernel_density_estimate, candidates)
 
             #candidates = [(l_index, self.__compute_objective([l_index, r_index, rel_index]))
             #              for l_index, candidate in enumerate(self.Entity.get_value().T)]
@@ -814,7 +829,7 @@ class TransHEmbedding:
         # complete the relation for the triple
         if right_entity and left_entity:
             candidates = ((left_entity, relation, right_entity) for relation in self.relation_indices.keys())
-            candidates = query_pool.map(self.kernel_density_estimate, candidates)
+            candidates = get_pool().map(self.kernel_density_estimate, candidates)
 
             candidates = sorted(candidates, key=lambda e: -e[1])
             return candidates[:topn]
@@ -886,20 +901,34 @@ class TransHEmbedding:
         return xi, xj, np.exp(-(weight_factor * entity_density_estimate + relation_density_estimate)
                               / 2 * (std ** 2)) / (2 * np.pi * std)
 
-    def nearest_neighbours(self, triples, topn=10):
+    def compute_affinity(self):
+        triples = (((ti.left_entity, ti.relation, ti.right_entity), (tj.left_entity, tj.relation, tj.right_entity))
+                   for ti,tj in product(*[self.kb_triples, self.kb_triples]))
+        affinity = get_pool().map(self.kernel_density_pair, triples)
+        affinity = np.array([a[2] for a in affinity])
+        self.affinity_matrix = affinity.reshape(len(self.kb_triples), len(self.kb_triples))
+
+    def nearest_neighbour(self, triple, topn=10):
         """
         compute the nearest topn neibhours of the relation triple
-        :param triple: list of relation triples of the form (l, r, h)
+        :param triple: relation triple of the form (le, rel, re)
         :return: topn nearest neighbours of the relation triple
         """
 
-        pairs = product(*[triples, ((neighbour.left_entity, neighbour.relation, neighbour.right_entity)
+        #nearby_leftentity_triples = chain.from_iterable([self.left_entity_triples[le] for le, _, _ in triples])
+        #nearby_rightentity_triples = chain.from_iterable([self.right_entity_triples[re] for _, _, re in triples])
+        #nearby_relation_triples = chain.from_iterable([self.relation_triples[rel] for _, rel, _ in triples])
+
+        #kb_triples = chain(*[nearby_rightentity_triples, nearby_leftentity_triples, nearby_relation_triples])
+
+        pairs = product(*[[triple], ((neighbour.left_entity, neighbour.relation, neighbour.right_entity)
                                     for neighbour in self.kb_triples)])
 
-        distances = query_pool.map(self.kernel_density_pair, pairs)
+        distances = get_pool().map(self.kernel_density_pair, pairs)
         candidates = sorted(distances, key=lambda e : -e[2])[:2 * topn]
         candidates = {e[1] : e[2] for e in candidates}
         return sorted(candidates.iteritems(), key=lambda e:-e[1])[:topn]
+
 
 
 

@@ -3,8 +3,8 @@ from __future__ import division
 import sys, re
 import logging
 import multiprocessing as mlp
-from collections import Counter
-from itertools import chain
+from itertools import chain, product
+import scipy as sp
 import numpy as np
 
 from nltk.corpus import stopwords
@@ -18,16 +18,28 @@ from nlp.sense2vec import SenseEmbedding as SE
 from nlp.understand_query import QueryTiler as QT
 from nlp.relation_extraction import RelationEmbedding as RE
 from sklearn.metrics.pairwise import euclidean_distances
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import spectral_clustering
 
 
 logger = logging.getLogger(__name__)
 
 reload(sys)
 sys.setdefaultencoding('utf8')
-
 alpha_numeric = re.compile('^[\s\w]+$')
 
-query_pool = mlp.Pool(mlp.cpu_count())
+has_pool = False
+module_pool = None
+
+
+def get_pool():
+    global module_pool
+    if has_pool:
+        return module_pool
+    query_pool = mlp.Pool(mlp.cpu_count())
+    module_pool = query_pool
+    return module_pool
+
 
 class WordMoverModel:
     """
@@ -85,6 +97,22 @@ class WordMoverModel:
             if sense_words:
                 self.document_models[block_id] = (sense_words, block)
 
+    def tokenizer(self, block):
+        return block.split(" ")
+
+    def form_idf_model(self):
+        documents = []
+        for _, sense_phrases, _ in self.tokenized_blocks:
+            sense_words = list(chain(*sense_phrases))
+            documents.append(" ".join(sense_words))
+
+        tfidf_model = TfidfVectorizer(lowercase=False, analyzer='word', tokenizer=self.tokenizer)
+        tfidf_model.fit(documents)
+
+        word_level_features = {index: feature for (index, feature) in enumerate(tfidf_model.get_feature_names())}
+        self.word_level_idf = {self.vocab[word_level_features[index]] : idf for (index, idf)
+                               in enumerate(tfidf_model.idf_) if self.vocab.has_key(word_level_features[index])}
+
     @staticmethod
     def label_distance(word1, word2):
         l1 = word1.split("|")[1]
@@ -93,7 +121,7 @@ class WordMoverModel:
 
     def assign_nearest_nbh(self, query_doc):
 
-        block_id, query_words, doc_words, query_weights = query_doc
+        block_id, query_words, doc_words = query_doc
         query_vector = self.vectorize(query_words)
         doc_vector = self.vectorize(doc_words)
         #distance = emd(query_vector, doc_vector, self.distance_matrix)
@@ -102,8 +130,13 @@ class WordMoverModel:
         doc_indices = np.nonzero(doc_vector)[0]
         query_indices = np.nonzero(query_vector)[0]
 
-        doc_centroid = np.average([self.embedding.model[self.reverse_vocab[i]] for i in doc_indices], axis=0)
-        query_centroid = np.average([self.embedding.model[self.reverse_vocab[i]] for i in query_indices], axis=0)
+        query_weights = [self.word_level_idf.get(q_i, 0) for q_i in query_indices]
+        doc_weights = [self.word_level_idf.get(d_i, 0) for d_i in doc_indices]
+
+        doc_centroid = np.average([self.embedding.model[self.reverse_vocab[i]] for i in doc_indices], axis=0,
+                                  weights=doc_weights)
+        query_centroid = np.average([self.embedding.model[self.reverse_vocab[i]] for i in query_indices], axis=0,
+                                    weights=query_weights)
 
         # sklearn euclidean distances may not be a symmetric matrix, so taking
         # average of the two entries
@@ -113,9 +146,10 @@ class WordMoverModel:
         label_assignment = np.argmin(dist_arr, axis=1)
         label_assignment = [(index, l) for index, l in enumerate(label_assignment)]
 
-        distances = [dist_arr[(i,e)] * query_weights[i] for i, e in label_assignment]
+        distances = [dist_arr[(i,e)] * self.word_level_idf.get(query_indices[i], 1) for i, e in label_assignment]
+
         distance = (1 - self.alpha) * np.sum(distances) + \
-                   self.alpha * np.linalg.norm(doc_centroid - query_centroid, ord=2)
+                   self.alpha * sp.spatial.distance.cosine(doc_centroid,query_centroid)
         return block_id, distance
 
     def word_mover_distance(self, query, tiled=False, topn=10):
@@ -126,21 +160,14 @@ class WordMoverModel:
         :return: [(block_id, block)] for the topn nearest document neighbours of the query
         """
         if not tiled:
-            tiled_words = self.query_tiler.tile(query, include_stopwords=False)[0]
+            tiled_query_words = self.query_tiler.tile(query, include_stopwords=False)[0]
         else:
-            tiled_words = query
+            tiled_query_words = query
 
-        if not tiled_words: raise RuntimeError("query could not be tiled by the embedding model")
-        tiled_words = [w for w in tiled_words if self.vocab.has_key(w)]
-        query_weights = [1] * len(tiled_words)
-        #query_expansion = [(w,s) for w,s in self.embedding.model.most_similar(tiled_words)
-        #                  if self.vocab.has_key(w)][:5]
-
-        #tiled_words.extend([s[0] for s in query_expansion])
-        #query_weights.extend([s[1] for s in query_expansion])
-
-        candidates = [(block_id, tiled_words, doc_words, query_weights) for block_id, (doc_words, _)
-                      in self.document_models.iteritems()]
+        if not tiled_query_words: raise RuntimeError("query could not be tiled by the embedding model")
+        tiled_query_words = [w for w in tiled_query_words if self.vocab.has_key(w)]
+        candidates = [(block_id, tiled_query_words, doc_words) for block_id, (doc_words, _) in
+                      self.document_models.iteritems()]
         #pool = Pool(processes=4)
         neighbours = map(self.assign_nearest_nbh, candidates)
         neighbours = sorted(neighbours, key=lambda e: e[1])
@@ -194,22 +221,68 @@ class WordMoverModelRelation:
                                                             relation.right_entity))
             self.doc_text[relation.block_id] = relation.text
 
-    def compute_word_mover(self, query):
-        block_id, query_relations, block_relations = query
+    def cluster_relations(self, affinity_matrix=None, num_clusters=10):
 
-        kernel_densities = np.array([[self.relation_embedding.kernel_density_pair((query_relation, block_relation))[2]
-                     for block_relation in block_relations] for query_relation in query_relations])
+        labels = spectral_clustering(affinity=affinity_matrix, n_clusters=num_clusters)
+        clustering_labels = zip([(e.left_entity, e.relation, e.right_entity) for e
+                                 in self.relation_embedding.kb_triples], labels)
+        self.clusters = defaultdict(list)
+        self.labeling = {}
+
+        for index, (triple, label) in enumerate(clustering_labels):
+            self.clusters[label].append((index, triple))
+            self.labeling[triple] = label
+
+        self.cluster_affinity = np.ndarray(shape=(num_clusters, num_clusters))
+        for label_i, label_j in product(*[self.clusters.keys(), self.clusters.keys()]):
+            triples_i = self.clusters[label_i]
+            triples_j = self.clusters[label_j]
+            self.cluster_affinity[label_i, label_j] = np.average([affinity_matrix[i, j] for (i, _), (j, _)
+                                                                  in product(*[triples_i, triples_j])])
+
+        self.cluster_representative = {}
+        for label, triples in self.clusters.items():
+            triples_indices = [t[0] for t in triples]
+            cluster_triple_affinity = affinity_matrix[triples_indices]
+            cluster_triple_affinity = cluster_triple_affinity[:, [triples_indices]]
+            representative = np.argmax(cluster_triple_affinity.sum(axis=0))
+            self.cluster_representative[label] = self.relation_embedding.kb_triples[triples_indices[representative]]
+
+        self.clusters_by_doc = {}
+        for block_id, doc_relations in self.relation_by_doc.iteritems():
+            doc_clusters = set([self.labeling[rel] for rel in doc_relations if rel in self.labeling])
+            self.clusters_by_doc[block_id] = doc_clusters
+
+    def compute_word_mover(self, query):
+        block_id, query_relations, query_affinity, block_relations = query
+
+        kernel_densities = np.array([[self.relation_embedding.kernel_density_pair
+                                      ((query_relation, block_relation))[2]
+                                      for block_relation in block_relations] for query_relation in query_relations])
+
         label_assignment = np.argmax(kernel_densities, axis=1)
+        affinity = np.sum([query_affinity[0][self.labeling[block_relations[l]]][2]
+                           for l in label_assignment if self.labeling.has_key(block_relations[l])])
+
         label_assignment = [(index, l) for index, l in enumerate(label_assignment)]
         densities = [kernel_densities[(i, e)] for i, e in label_assignment]
-        return block_id, 0.5 * np.sum(densities) + 0.5 * np.sum(kernel_densities)
+
+        return block_id, 0.5 * np.sum(densities) + 0.4 * affinity
 
     def compute_nearest_docs(self, query, topn=10):
 
-        candidates = [(block_id, query, block_relations) for block_id, block_relations
+        query_affinity = []
+        for query_triple in query:
+            candidates = [(query_triple, (n.left_entity, n.relation, n.right_entity))
+                          for n in self.cluster_representative.values()]
+            affinity = get_pool().map(self.relation_embedding.kernel_density_pair, candidates)
+            affinity = {c : e for c, e in enumerate(affinity)}
+            query_affinity.append(affinity)
+
+        candidates = [(block_id, query, query_affinity, block_relations) for block_id, block_relations
                       in self.relation_by_doc.iteritems()]
 
-        density_by_doc = query_pool.map(self.compute_word_mover, candidates)
+        density_by_doc = get_pool().map(self.compute_word_mover, candidates)
         density_by_doc = sorted(density_by_doc, key=lambda e: -e[1])[:topn]
         nearest_docs = [(block_id, score, self.doc_text[block_id]) for block_id, score in density_by_doc]
         return nearest_docs
