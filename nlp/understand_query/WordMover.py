@@ -261,8 +261,8 @@ class WordMoverModelRelation:
                                       for block_relation in block_relations] for query_relation in query_relations])
 
         label_assignment = np.argmax(kernel_densities, axis=1)
-        affinity = np.sum([query_affinity[0][self.labeling[block_relations[l]]][2]
-                           for l in label_assignment if self.labeling.has_key(block_relations[l])])
+        affinity = np.sum([query_affinity[i][self.labeling[block_relations[l]]][2]
+                           for i,l in enumerate(label_assignment) if self.labeling.has_key(block_relations[l])])
 
         label_assignment = [(index, l) for index, l in enumerate(label_assignment)]
         densities = [kernel_densities[(i, e)] for i, e in label_assignment]
