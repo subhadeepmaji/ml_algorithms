@@ -1,7 +1,7 @@
 from __future__ import division
 
-import sys, re
-import logging
+import sys, re, time, tempfile, os
+import logging, copy_reg, types
 import multiprocessing as mlp
 from itertools import chain, product
 import scipy as sp
@@ -21,6 +21,8 @@ from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import spectral_clustering
 
+from joblib import Parallel, delayed
+from joblib import load, dump
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +33,25 @@ alpha_numeric = re.compile('^[\s\w]+$')
 has_pool = False
 module_pool = None
 
+def _pickle_method(m):
+    if m.im_self is None:
+        return getattr, (m.im_class, m.im_func.func_name)
+    else:
+        return getattr, (m.im_self, m.im_func.func_name)
+
+copy_reg.pickle(types.MethodType, _pickle_method)
+
 
 def get_pool():
     global module_pool
     if has_pool:
         return module_pool
-    query_pool = mlp.Pool(mlp.cpu_count())
+    query_pool = mlp.Pool(4)
     module_pool = query_pool
     return module_pool
+
+def func(obj, *args, **kwargs):
+    return obj.compute_word_mover(*args, **kwargs)
 
 
 class WordMoverModel:
@@ -214,6 +227,17 @@ class WordMoverModelRelation:
         self.relation_embedding = relation_embedding
         self.relation_by_doc = defaultdict(list)
         self.doc_text = {}
+        self.parallel_pool = Parallel(n_jobs=-1, verbose=100, batch_size=1024,
+                                      pre_dispatch='all', temp_folder=".", max_nbytes=4096)
+
+    def __getstate__(self):
+        state = dict()
+        state["labeling"] = self.__dict__["labeling"]
+        state["relation_embedding"] = self.__dict__["relation_embedding"]
+        return state
+
+    def __setstate(self, d):
+        self.__dict__.update(d)
 
     def form_doc_relations(self):
         for relation in self.relation_blocks:
@@ -233,11 +257,11 @@ class WordMoverModelRelation:
             self.clusters[label].append((index, triple))
             self.labeling[triple] = label
 
-        self.cluster_affinity = np.ndarray(shape=(num_clusters, num_clusters))
+        cluster_affinity = np.ndarray(shape=(num_clusters, num_clusters))
         for label_i, label_j in product(*[self.clusters.keys(), self.clusters.keys()]):
             triples_i = self.clusters[label_i]
             triples_j = self.clusters[label_j]
-            self.cluster_affinity[label_i, label_j] = np.average([affinity_matrix[i, j] for (i, _), (j, _)
+            cluster_affinity[label_i, label_j] = np.average([affinity_matrix[i, j] for (i, _), (j, _)
                                                                   in product(*[triples_i, triples_j])])
 
         self.cluster_representative = {}
@@ -253,13 +277,12 @@ class WordMoverModelRelation:
             doc_clusters = set([self.labeling[rel] for rel in doc_relations if rel in self.labeling])
             self.clusters_by_doc[block_id] = doc_clusters
 
-    def compute_word_mover(self, query):
-        block_id, query_relations, query_affinity, block_relations = query
+    def compute_word_mover(self, query, query_affinity, entity, relation_normal):
+        block_id, query_relations, block_relations = query
 
-        kernel_densities = np.array([[self.relation_embedding.kernel_density_pair
-                                      ((query_relation, block_relation))[2]
-                                      for block_relation in block_relations] for query_relation in query_relations])
-
+        kernel_densities = np.array([[self.relation_embedding.kernel_density_pair(
+            (query_relation, block_relation), relation_normal=relation_normal, entity=entity, mmaped = True)[2]
+        for block_relation in block_relations] for query_relation in query_relations])
         label_assignment = np.argmax(kernel_densities, axis=1)
         affinity = np.sum([query_affinity[i][self.labeling[block_relations[l]]][2]
                            for i,l in enumerate(label_assignment) if self.labeling.has_key(block_relations[l])])
@@ -269,22 +292,39 @@ class WordMoverModelRelation:
 
         return block_id, 0.6 * np.sum(densities) + 0.4 * affinity
 
-    def compute_nearest_docs(self, query, topn=10):
+    def memorymap_model_arrays(self):
+        persist_folder= tempfile.mkdtemp()
+        entity = self.relation_embedding.Entity.get_value()
+        relation_normal = self.relation_embedding.RelationNormal.get_value()
 
+        self.file_entity = os.path.join(persist_folder, "entity")
+        self.file_relation_normal = os.path.join(persist_folder, "relation_normal")
+
+        dump(entity, self.file_entity)
+        dump(relation_normal, self.file_relation_normal)
+
+    def compute_nearest_docs(self, query, topn=10):
+        t1 = time.time()
         query_affinity = []
         for query_triple in query:
             candidates = [(query_triple, (n.left_entity, n.relation, n.right_entity))
                           for n in self.cluster_representative.values()]
-            affinity = get_pool().map(self.relation_embedding.kernel_density_pair, candidates)
+            affinity = map(self.relation_embedding.kernel_density_pair, candidates)
             affinity = {c : e for c, e in enumerate(affinity)}
             query_affinity.append(affinity)
 
-        candidates = [(block_id, query, query_affinity, block_relations) for block_id, block_relations
+        candidates = [(block_id, query, block_relations) for block_id, block_relations
                       in self.relation_by_doc.iteritems()]
+        entity = load(self.file_entity, mmap_mode="r")
+        relation_normal = load(self.file_relation_normal, mmap_mode="r")
+        density_by_doc = self.parallel_pool(delayed(func)(self, candidate, query_affinity,
+                                                          entity, relation_normal)
+                                            for candidate in candidates)
 
-        density_by_doc = get_pool().map(self.compute_word_mover, candidates)
         density_by_doc = sorted(density_by_doc, key=lambda e: -e[1])[:topn]
         nearest_docs = [(block_id, score, self.doc_text[block_id]) for block_id, score in density_by_doc]
+        t2 = time.time()
+        print t2 -t1, " seconds"
         return nearest_docs
 
 

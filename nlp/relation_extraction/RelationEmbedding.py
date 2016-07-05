@@ -6,6 +6,7 @@ import numpy as np
 import scipy as sp
 import theano
 import theano.tensor as T
+import copy_reg, types
 from itertools import izip, chain
 from gensim.models.word2vec import Word2Vec
 from theano.ifelse import ifelse
@@ -20,6 +21,14 @@ logger = logging.getLogger(__name__)
 has_pool = False
 module_pool = None
 
+
+def _pickle_method(m):
+    if m.im_self is None:
+        return getattr, (m.im_class, m.im_func.func_name)
+    else:
+        return getattr, (m.im_self, m.im_func.func_name)
+
+copy_reg.pickle(types.MethodType, _pickle_method)
 
 def get_pool():
     global module_pool
@@ -519,7 +528,16 @@ class TransHEmbedding:
         self.right_entity_triples = defaultdict(list)
         self.relation_triples = defaultdict(list)
 
-        self.param_value_new, self.param_value_old = False, False
+    def __getstate__(self):
+        state = dict()
+        state["entity_indices"] = self.__dict__["entity_indices"]
+        state["relation_indices"] = self.__dict__["relation_indices"]
+        state["entity_idf"] = self.__dict__["entity_idf"]
+        state["relation_norm_factor"] = self.__dict__["relation_norm_factor"]
+        return state
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
 
     def form_vec(self, entity, embedding, sense='NOUN'):
         if not embedding:
@@ -660,13 +678,13 @@ class TransHEmbedding:
 
         return gradient_entity, gradient_relation, gradient_surface
 
-    def __converged(self, epoch, max_epochs):
+    def __converged(self, epoch, max_epochs, param_value_old, param_value_new):
         if epoch <= 1: return False
         if epoch >= max_epochs:
             logger.warn("Reaching maximum iterations, model parameters may not have converged")
             return True
 
-        diff_params = [v_new - v_old for (v_new, v_old) in izip(self.param_value_new, self.param_value_old)]
+        diff_params = [v_new - v_old for (v_new, v_old) in izip(param_value_new, param_value_old)]
         above_tolerance = [np.count_nonzero(e > self.tolerance) for e in diff_params]
 
         if not max(above_tolerance):
@@ -712,7 +730,9 @@ class TransHEmbedding:
 
         triple_indices = range(len(self.kb_triples))
         entity_indices = self.entity_indices.values()
-        while not self.__converged(epochs, max_epochs):
+        param_value_old, param_value_new = None, None
+
+        while not self.__converged(epochs, max_epochs, param_value_old, param_value_new):
             s_batch = np.random.choice(triple_indices, size=self.batch_size)
             s_batch = [self.kb_triples[i] for i in s_batch]
             training_batch = []
@@ -739,9 +759,9 @@ class TransHEmbedding:
                 training_triple.extend(neg_triple)
                 training_batch.append(training_triple)
 
-            self.param_value_old = [T.copy(p).get_value() for p in self.params]
+            param_value_old = [T.copy(p).get_value() for p in self.params]
             self.model(training_batch)
-            self.param_value_new = [p.get_value() for p in self.params]
+            param_value_new = [p.get_value() for p in self.params]
             epochs += 1
         self.normalize_relations()
 
@@ -854,12 +874,16 @@ class TransHEmbedding:
             density += self.kernel_density_pair((x, triple), std=std)[2]
         return x, density / len(triples)
 
-    def kernel_density_pair(self, x_pair, std = 1):
+    def kernel_density_pair(self, x_pair, std = 1, relation_normal=None,
+                            entity=None, mmaped=False):
         """
         compute the kernel density metric distance between the relation triples
         xi and xj
         :param x_pair: ((l1,r1,h1), (l2, r2, h2)) of the triple
         :param std : standard deviation of the Gaussian Kernel
+        :param relation_normal:
+        :param entity:
+        :param mmaped:
         :return: kernel density distance between the two triples
         """
         xi, xj = x_pair
@@ -874,16 +898,21 @@ class TransHEmbedding:
         except KeyError, e:
             return xi, xj, 0
 
-        li = self.Entity.get_value()[:, li_index]
-        lj = self.Entity.get_value()[:, lj_index]
-        hi = self.Entity.get_value()[:, hi_index]
-        hj = self.Entity.get_value()[:, hj_index]
+        if mmaped:
+            li, lj = entity[:, li_index], entity[:, lj_index]
+            hi, hj = entity[:, hi_index], entity[:, hj_index]
+        else:
+            li = self.Entity.get_value()[:, li_index]
+            lj = self.Entity.get_value()[:, lj_index]
+            hi = self.Entity.get_value()[:, hi_index]
+            hj = self.Entity.get_value()[:, hj_index]
 
-        ri_normal = self.RelationNormal.get_value()[:,ri_index]
-        rj_normal = self.RelationNormal.get_value()[:, rj_index]
-
-        ri = self.Relation.get_value()[:,ri_index]
-        rj = self.Relation.get_value()[:,rj_index]
+        if mmaped:
+            ri_normal = relation_normal[:, ri_index]
+            rj_normal = relation_normal[:, rj_index]
+        else:
+            ri_normal = self.RelationNormal.get_value()[:,ri_index]
+            rj_normal = self.RelationNormal.get_value()[:, rj_index]
 
         li_plane = li - (np.dot(ri_normal, li) * ri_normal)
         lj_plane = lj - (np.dot(rj_normal, lj) * rj_normal)
