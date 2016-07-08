@@ -2,6 +2,8 @@ from __future__ import division
 import logging
 import random
 
+import tempfile, os, sys
+
 import numpy as np
 import scipy as sp
 import theano
@@ -12,14 +14,21 @@ from gensim.models.word2vec import Word2Vec
 from theano.ifelse import ifelse
 import multiprocessing as mlp
 from collections import defaultdict
+from collections import namedtuple
 from itertools import product
 
 from nlp.relation_extraction import RelationTuple
 from nlp.sense2vec import SenseEmbedding as SE
 
+
+from joblib import Parallel, delayed
+from joblib import load, dump
+
 logger = logging.getLogger(__name__)
 has_pool = False
 module_pool = None
+
+QueryObject = namedtuple('QueryObject', ['query', 'le', 'rel', 're'])
 
 
 def _pickle_method(m):
@@ -37,6 +46,17 @@ def get_pool():
     query_pool = mlp.Pool(mlp.cpu_count())
     module_pool = query_pool
     return module_pool
+
+
+def kernel_density_pair(obj, *args, **kwargs):
+    return obj.kernel_density_pair(*args, **kwargs)
+
+
+def kernel_density_estimate(obj, *args, **kwargs):
+    return obj.kernel_density_estimate(*args, **kwargs)
+
+
+
 
 class BengioEmbedding:
 
@@ -527,12 +547,14 @@ class TransHEmbedding:
         self.left_entity_triples = defaultdict(list)
         self.right_entity_triples = defaultdict(list)
         self.relation_triples = defaultdict(list)
+        self.parallel_pool = Parallel(n_jobs=-1, verbose=100, batch_size=1024 * 16,
+                                      pre_dispatch=100000, temp_folder=".", max_nbytes=4096)
+
 
     def __getstate__(self):
         state = dict()
         state["entity_indices"] = self.__dict__["entity_indices"]
         state["relation_indices"] = self.__dict__["relation_indices"]
-        state["entity_idf"] = self.__dict__["entity_idf"]
         state["relation_norm_factor"] = self.__dict__["relation_norm_factor"]
         return state
 
@@ -564,6 +586,7 @@ class TransHEmbedding:
 
             l_entity, r_entity, relation = knowledge_tuple.left_entity, knowledge_tuple.right_entity, \
                                            knowledge_tuple.relation
+
             entities.add(l_entity)
             entities.add(r_entity)
             relations.add(relation)
@@ -794,7 +817,7 @@ class TransHEmbedding:
         self.entity_idf = {entity : (idf - min_idf + entity_epsilon) / normalize_factor for entity, idf
                            in self.entity_idf.iteritems()}
 
-    def predict(self, left_entity=None, right_entity=None, relation=None, topn=10):
+    def predict(self, query_triples, topn=10):
         """
         predict the completion for a partial triple, supported
         inputs are (le,re), (le,rel), (re,rel),(le, re, rel)
@@ -808,71 +831,59 @@ class TransHEmbedding:
         completion prediction otherwise ignored
         :return: list of entity, list of relation or likelihood value
         """
-        assert left_entity or relation or right_entity, "all inputs cannot be left unspecified"
-        is_le, is_re = bool(left_entity), bool(right_entity)
-        is_relation = bool(relation)
+        entity_arr = load(self.file_entity, mmap_mode="r")
+        relation_normal_arr = load(self.file_relation_normal, mmap_mode="r")
+        relation_arr = load(self.file_relation, mmap_mode="r")
 
-        if int(is_le) + int(is_relation) + int(is_re) < 2:
-            raise RuntimeError("Atleast two of the inputs must be specified")
+        candidates_lr = list(chain(*[[(e.query[0], e.query[1], h) for h in self.entity_indices.keys()]
+                                     for e in query_triples if e.le and e.rel]))
 
-        if left_entity and not self.entity_indices.has_key(left_entity):
-            raise RuntimeError("entity is not known %s" % left_entity)
+        candidates_rh = list(chain(*[[(l, e.query[0], e.query[1]) for l in self.entity_indices.keys()]
+                                     for e in query_triples if e.rel and e.re]))
 
-        if right_entity and not self.entity_indices.has_key(right_entity):
-            raise RuntimeError("entity is not known %s" % right_entity)
+        candidates_lh = list(chain(*[[(e.query[0], r, e.query[1]) for r in self.relation_indices.keys()]
+                                     for e in query_triples if e.le and e.re]))
 
-        if relation and not self.relation_indices.has_key(relation):
-            raise RuntimeError("relation not known %s" % relation)
+        candidates = []
+        candidates.extend(candidates_lr)
+        candidates.extend(candidates_rh)
+        candidates.extend(candidates_lh)
 
-        # complete the right entity of the relation
-        if left_entity and relation:
+        candidates = self.parallel_pool(delayed(kernel_density_estimate)
+                                        (self, candidate, relation_normal=relation_normal_arr,
+                                        entity=entity_arr, relation=relation_arr, mmaped=True)
+                                        for candidate in candidates)
 
-            candidates = ((left_entity, relation, right_entity) for right_entity in self.entity_indices.keys())
-            candidates = get_pool().map(self.kernel_density_estimate, candidates)
-            #candidates = [((left_entity, relation, right_entity),
-            #               self.kernel_density_estimate((left_entity, relation, right_entity)))
-            #              for right_entity in self.entity_indices.keys()]
+        candidates = sorted(candidates, key=lambda e: e[1])
+        return candidates[:topn]
 
-            candidates = sorted(candidates, key=lambda e: -e[1])
-            return candidates[:topn]
-
-        # complete the left entity of the relation
-        if right_entity and relation:
-            candidates = ((left_entity, relation, right_entity) for left_entity in self.entity_indices.keys())
-            candidates = get_pool().map(self.kernel_density_estimate, candidates)
-
-            #candidates = [(l_index, self.__compute_objective([l_index, r_index, rel_index]))
-            #              for l_index, candidate in enumerate(self.Entity.get_value().T)]
-            candidates = sorted(candidates, key=lambda e: -e[1])
-            return candidates[:topn]
-
-        # complete the relation for the triple
-        if right_entity and left_entity:
-            candidates = ((left_entity, relation, right_entity) for relation in self.relation_indices.keys())
-            candidates = get_pool().map(self.kernel_density_estimate, candidates)
-
-            candidates = sorted(candidates, key=lambda e: -e[1])
-            return candidates[:topn]
-
-    def kernel_density_estimate(self, x, std = 1):
+    def kernel_density_estimate(self, x, relation_normal=None, relation=None, entity=None, mmaped=False):
         """
         compute the kernel density estimate for a triple
         :param xi: (l, r, h) of the relation triple
         :param std: standard deviation of the Gaussian Kernel
+        :param relation_normal:
+        :param relation:
+        :param entity:
+        :param mmaped:
         :return: Density estimate for the relation triple
         """
-        density = 0
-        (l_e, rel, r_e) = x
-        triples = self.left_entity_relation[(l_e, rel)]
-        triples.extend(self.left_entity_relation[(r_e, rel)])
+        (l_e, rel, h_e) = x
+        try:
+            (l_index, rel_index, h_index) = self.entity_indices[l_e], self.relation_indices[rel], \
+                                            self.entity_indices[h_e]
+        except KeyError as e:
+            return x, sys.maxint
 
-        if not triples:
-            return x, 0.0
+        if mmaped:
+            l = entity[:, l_index]
+            h = entity[:, h_index]
+            r_normal = relation_normal[:, rel_index]
+            r = relation[:, rel_index]
 
-        for triple in triples:
-            triple = triple.left_entity, triple.relation, triple.right_entity
-            density += self.kernel_density_pair((x, triple), std=std)[2]
-        return x, density / len(triples)
+        l_plane = l - (np.dot(r_normal, l) * r_normal)
+        h_plane = h - (np.dot(r_normal, h) * r_normal)
+        return x, np.linalg.norm(l_plane + r - h_plane)
 
     def kernel_density_pair(self, x_pair, std = 1, relation_normal=None,
                             entity=None, mmaped=False):
@@ -920,43 +931,75 @@ class TransHEmbedding:
         hj_plane = hj - (np.dot(rj_normal, hj) * rj_normal)
 
         relation_norm_factor = self.relation_norm_factor[rel_i]
-        left_entity_idf = self.entity_idf[le_i]
-        right_entity_idf = self.entity_idf[re_i]
+        entity_density_estimate = sp.spatial.distance.cosine(li_plane,lj_plane) \
+                                  + sp.spatial.distance.cosine(hi_plane,hj_plane)
 
-        entity_density_estimate = left_entity_idf * sp.spatial.distance.cosine(li_plane,lj_plane) \
-                                  + right_entity_idf * sp.spatial.distance.cosine(hi_plane,hj_plane)
-        relation_density_estimate = relation_norm_factor * sp.spatial.distance.cosine(ri_normal, rj_normal)
-        weight_factor = 2 * (left_entity_idf + right_entity_idf) / relation_norm_factor
-        return xi, xj, np.exp(-(weight_factor * entity_density_estimate + relation_density_estimate)
-                              / 2 * (std ** 2)) / (2 * np.pi * std)
+        relation_density_estimate = sp.spatial.distance.cosine(ri_normal, rj_normal)
+        density_estimate = relation_norm_factor * relation_density_estimate + entity_density_estimate
+
+        return xi, xj, np.exp(-entity_density_estimate / 2 * (std ** 2)) / (2 * np.pi * std)
 
     def compute_affinity(self):
         triples = (((ti.left_entity, ti.relation, ti.right_entity), (tj.left_entity, tj.relation, tj.right_entity))
                    for ti,tj in product(*[self.kb_triples, self.kb_triples]))
-        affinity = get_pool().map(self.kernel_density_pair, triples)
+
+        entity = load(self.file_entity, mmap_mode="r")
+        relation_normal = load(self.file_relation_normal, mmap_mode="r")
+
+        affinity = self.parallel_pool(delayed(kernel_density_pair)
+                                       (self, pair, relation_normal=relation_normal,
+                                        entity=entity, mmaped=True)
+                                       for pair in triples)
+
         affinity = np.array([a[2] for a in affinity])
         self.affinity_matrix = affinity.reshape(len(self.kb_triples), len(self.kb_triples))
 
-    def nearest_neighbour(self, triple, topn=10):
+    def memorymap_model_arrays(self):
+        persist_folder = tempfile.mkdtemp()
+        entity = self.Entity.get_value()
+        relation_normal = self.RelationNormal.get_value()
+        relation = self.Relation.get_value()
+
+        self.file_entity = os.path.join(persist_folder, "entity")
+        self.file_relation_normal = os.path.join(persist_folder, "relation_normal")
+        self.file_relation = os.path.join(persist_folder, "relation")
+
+        dump(entity, self.file_entity)
+        dump(relation_normal, self.file_relation_normal)
+        dump(relation, self.file_relation)
+
+    def compute_relation_similarity(self):
+
+        num_relations = len(self.relation_indices)
+        relation_sim = np.ndarray(shape=(num_relations, num_relations))
+        for (rel1, index1), (rel2, index2) in product(*[self.relation_indices.iteritems(),
+                                                        self.relation_indices.iteritems()]):
+
+            if index1 == index2:
+                relation_sim[index1][index2] = 0
+                continue
+
+            rel1_vec = self.RelationNormal.get_value()[:, index1]
+            rel2_vec = self.RelationNormal.get_value()[:, index2]
+
+            relation_sim[index1][index2] = np.dot(rel1_vec, rel2_vec) / \
+                                           (np.linalg.norm(rel1_vec) * np.linalg.norm(rel2_vec))
+
+        return relation_sim
+
+    def nearest_neighbour(self, triples, topn=10):
         """
         compute the nearest topn neibhours of the relation triple
         :param triple: relation triple of the form (le, rel, re)
         :return: topn nearest neighbours of the relation triple
         """
+        query_triples = [(QueryObject(query=(triple[0], triple[1]), le=1, rel=1, re=0),
+                          QueryObject(query=(triple[1], triple[2]), le=0, rel=1, re=1),
+                          QueryObject(query=(triple[0], triple[2]), le=1, rel=0, re=1))
+                          for triple in triples]
 
-        #nearby_leftentity_triples = chain.from_iterable([self.left_entity_triples[le] for le, _, _ in triples])
-        #nearby_rightentity_triples = chain.from_iterable([self.right_entity_triples[re] for _, _, re in triples])
-        #nearby_relation_triples = chain.from_iterable([self.relation_triples[rel] for _, rel, _ in triples])
-
-        #kb_triples = chain(*[nearby_rightentity_triples, nearby_leftentity_triples, nearby_relation_triples])
-
-        pairs = product(*[[triple], ((neighbour.left_entity, neighbour.relation, neighbour.right_entity)
-                                    for neighbour in self.kb_triples)])
-
-        distances = get_pool().map(self.kernel_density_pair, pairs)
-        candidates = sorted(distances, key=lambda e : -e[2])[:2 * topn]
-        candidates = {e[1] : e[2] for e in candidates}
-        return sorted(candidates.iteritems(), key=lambda e:-e[1])[:topn]
+        query_triples = list(chain(*query_triples))
+        return self.predict(query_triples, topn=topn)
 
 
 
