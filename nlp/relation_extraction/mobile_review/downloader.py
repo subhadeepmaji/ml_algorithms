@@ -99,7 +99,7 @@ class EntityNormalizer:
 
             left_entity, rel, right_entity, sentence, product = \
                 triple.left_entity, triple.relation, triple.right_entity, \
-                triple.sentence, triple.productName
+                triple.sentence, triple.payload
 
             stem_tokens = {self.stemmer.stem(word) : word for word in word_tokenize(sentence)}
 
@@ -113,21 +113,21 @@ class EntityNormalizer:
                 continue
 
             if len(left_entity.split(" ")) < 5:
-                if left_entity not in self.entities_text:
+                if (product, left_entity) not in self.entities_text:
                     left_entity = self.nlp_engine(unicode(left_entity))
                     self.entities[product].append(left_entity)
-                    self.entities_text.add(left_entity.text)
+                    self.entities_text.add((product, left_entity.text))
 
             if len(right_entity.split(" ")) < 5:
-                if right_entity not in self.entities_text:
+                if (product, right_entity) not in self.entities_text:
                     right_entity = self.nlp_engine(unicode(right_entity))
                     self.entities[product].append(right_entity)
-                    self.entities_text.add(right_entity.text)
+                    self.entities_text.add((product, right_entity.text))
 
-            if rel not in self.relation_text:
+            if (product, rel) not in self.relation_text:
                 rel = self.nlp_engine(unicode(rel))
                 self.relations[product].append(rel)
-                self.relation_text.add(rel.text)
+                self.relation_text.add((product, rel.text))
 
     def most_similar(self, query, topn=10):
         nouns = list(query.nouns)
@@ -139,16 +139,20 @@ class EntityNormalizer:
 
         sim_nouns = []
         sim_verbs = []
+
+        entities  = self.entities[query.product]
+        relations = self.entities[query.product]
+
         for noun in nouns:
             noun = self.nlp_engine(unicode(noun))
-            noun_similarity = [(entity, noun.similarity(entity)) for entity in self.entities]
+            noun_similarity = [(entity, noun.similarity(entity)) for entity in entities]
             noun_similarity = [(entity.text, sim) for entity, sim in noun_similarity
                                if sim > self.sim_threshold]
             sim_nouns.extend(noun_similarity)
 
         for verb in verbs:
             verb = self.nlp_engine(unicode(verb))
-            verb_similarity = [(relation, verb.similarity(relation)) for relation in self.relations]
+            verb_similarity = [(relation, verb.similarity(relation)) for relation in relations]
             verb_similarity = [(relation.text, sim) for relation, sim in verb_similarity
                                if sim > self.sim_threshold]
             sim_verbs.extend(verb_similarity)
