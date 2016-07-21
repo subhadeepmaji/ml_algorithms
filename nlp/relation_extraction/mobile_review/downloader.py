@@ -7,9 +7,12 @@ from itertools import product
 from collections import namedtuple
 
 from spacy import English
+from nltk.stem import PorterStemmer
+from nltk import word_tokenize
 from elasticsearch_dsl.connections import connections
 from elasticsearch_dsl.query import Q, Match
 
+from collections import defaultdict
 from nlp.relation_extraction.data_source.models import ReviewArticle
 from nlp.relation_extraction.data_sink.models import ReviewRelation
 from nlp.relation_extraction.data_source import MONGO_HOST,MONGO_PORT
@@ -18,7 +21,7 @@ from nlp.relation_extraction.data_sink import ELASTIC_HOST, ELASTIC_PORT
 
 url_base = "http://www.gsmarena.com/abc-review-%dp%d.php"
 Review = namedtuple("Review", ["review_url", "review_title", "review_body"])
-RelationQuery = namedtuple("RelationQuery", ["nouns", "verbs", "np_chunks"])
+RelationQuery = namedtuple("RelationQuery", ["nouns", "verbs", "np_chunks", "product"])
 
 
 class GSMArenaDownloader:
@@ -36,7 +39,7 @@ class GSMArenaDownloader:
         self.crawl_urls = []
 
     def form_urls(self):
-        for prod_index, page_index in product(xrange(1, self.product_limit),
+        for prod_index, page_index in product(xrange(self.product_limit, 1, -1),
                                               xrange(1, self.page_limit)):
             page = url_base %(prod_index, page_index)
             self.crawl_urls.append(page)
@@ -79,19 +82,102 @@ class GSMArenaDownloader:
         wait(write_tasks, return_when=ALL_COMPLETED)
 
 
+class EntityNormalizer:
+
+    def __init__(self, kb_triples, nlp_engine, sim_threshold=0.6,):
+        self.kb_triples = kb_triples
+        self.entities = defaultdict(list)
+        self.entities_text = set()
+        self.relations = defaultdict(list)
+        self.relation_text = set()
+        self.nlp_engine = nlp_engine
+        self.stemmer = PorterStemmer()
+        self.sim_threshold = sim_threshold
+
+    def normalize_entities(self):
+        for triple in self.kb_triples:
+
+            left_entity, rel, right_entity, sentence, product = \
+                triple.left_entity, triple.relation, triple.right_entity, \
+                triple.sentence, triple.productName
+
+            stem_tokens = {self.stemmer.stem(word) : word for word in word_tokenize(sentence)}
+
+            left_entity  = " ".join([stem_tokens[w] for w in word_tokenize(left_entity)
+                                     if w in stem_tokens])
+            right_entity = " ".join([stem_tokens[w] for w in word_tokenize(right_entity)
+                                     if w in stem_tokens])
+            rel = " ".join([stem_tokens[w] for w in word_tokenize(rel) if w in stem_tokens])
+
+            if not left_entity or not right_entity or not rel:
+                continue
+
+            if len(left_entity.split(" ")) < 5:
+                if left_entity not in self.entities_text:
+                    left_entity = self.nlp_engine(unicode(left_entity))
+                    self.entities[product].append(left_entity)
+                    self.entities_text.add(left_entity.text)
+
+            if len(right_entity.split(" ")) < 5:
+                if right_entity not in self.entities_text:
+                    right_entity = self.nlp_engine(unicode(right_entity))
+                    self.entities[product].append(right_entity)
+                    self.entities_text.add(right_entity.text)
+
+            if rel not in self.relation_text:
+                rel = self.nlp_engine(unicode(rel))
+                self.relations[product].append(rel)
+                self.relation_text.add(rel.text)
+
+    def most_similar(self, query, topn=10):
+        nouns = list(query.nouns)
+        nouns.append(query.np_chunks)
+        verbs = "" if not query.verbs else query.verbs
+
+        if not nouns: nouns = ""
+        if not verbs and not nouns: return None
+
+        sim_nouns = []
+        sim_verbs = []
+        for noun in nouns:
+            noun = self.nlp_engine(unicode(noun))
+            noun_similarity = [(entity, noun.similarity(entity)) for entity in self.entities]
+            noun_similarity = [(entity.text, sim) for entity, sim in noun_similarity
+                               if sim > self.sim_threshold]
+            sim_nouns.extend(noun_similarity)
+
+        for verb in verbs:
+            verb = self.nlp_engine(unicode(verb))
+            verb_similarity = [(relation, verb.similarity(relation)) for relation in self.relations]
+            verb_similarity = [(relation.text, sim) for relation, sim in verb_similarity
+                               if sim > self.sim_threshold]
+            sim_verbs.extend(verb_similarity)
+
+        noun_similarity = sorted(sim_nouns, key=lambda e: -e[1])
+        verb_similarity = sorted(sim_verbs, key=lambda e: -e[1])
+
+        noun_similarity = [n[0] for n in noun_similarity]
+        verb_similarity = [v[0] for v in verb_similarity]
+        return  noun_similarity[:topn], verb_similarity[:topn]
+
+
 class QueryResolver:
 
-    def __init__(self, num_results=5):
+    def __init__(self, kb_triples, engine, num_results=5):
         self.num_results = num_results
+        self.kb_triples = kb_triples
+        self.nlp_engine = engine
         self.inited_engine = False
 
     def init_engine(self):
         # this initialization may take time, so moving this
         # out of object creation path
-        self.nlp_engine = English()
         model_name = ReviewRelation.index + "." + ReviewRelation.mapping
         self.es_engine = connections.create_connection(model_name, hosts=[ELASTIC_HOST],
                                                        port=ELASTIC_PORT)
+
+        self.entity_normalizer = EntityNormalizer(self.kb_triples, self.nlp_engine)
+        self.entity_normalizer.normalize_entities()
         self.inited_engine = True
 
     def form_relation_query(self, relation_query):
@@ -103,14 +189,19 @@ class QueryResolver:
         if not entity_query: entity_query = ""
         verb_query = "" if not relation_query.verbs else relation_query.verbs
 
-        query = Q('bool', should=[Q('multi_match', query=entity_query,
-                                    fields=['leftEntity', 'rightEntity'], boost=3),
-                                  Match(relation={"query" : verb_query})])
+        if not entity_query and not verb_query: return None
+
+        product = relation_query.product
+        query = Q('bool',
+                  must=[Q('match', productName={"query" : product, "type" : "phrase"})],
+                  should=[Q('multi_match', query=entity_query,
+                            fields=['leftEntity', 'rightEntity'], boost=3),
+                          Match(relation={"query" : verb_query})])
 
         s = search_engine.query(query)
         return s
 
-    def resolve(self, query):
+    def resolve(self, query, product):
         assert self.inited_engine, "Query engine must be inited to perform a query"
         query = unicode(query)
         nlp_query = self.nlp_engine(query)
@@ -126,9 +217,18 @@ class QueryResolver:
         for np_chunk in nlp_query.noun_chunks:
             noun_chunks.append(np_chunk.text)
 
-        query = self.form_relation_query(RelationQuery(nouns=noun_tokens, verbs=verb_tokens,
-                                                       np_chunks=noun_chunks))
+        query = RelationQuery(nouns=noun_tokens, verbs=verb_tokens,
+                              np_chunks=noun_chunks, product=product)
+
+        np, vp = self.entity_normalizer.most_similar(query)
+        query = RelationQuery(nouns = np, verbs = vp, np_chunks=[], product=product)
+
+        query = self.form_relation_query(query)
+        if not query: return None
+
         response = query.execute()
+        query_response = []
+
         for doc in response[:self.num_results]:
             print "----------------------------------"
 
@@ -138,7 +238,13 @@ class QueryResolver:
             print "sentence :: ", doc.sentence
 
             print "----------------------------------"
+            query_response.append({
+                "productName" : doc.productName,
+                "sentence" : doc.sentence,
+                "reviewText" : doc.text
+            })
 
+        return query_response
 
 
 

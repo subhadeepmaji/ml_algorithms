@@ -56,8 +56,6 @@ def kernel_density_estimate(obj, *args, **kwargs):
     return obj.kernel_density_estimate(*args, **kwargs)
 
 
-
-
 class BengioEmbedding:
 
     def __init__(self, dimension, learning_rate=1e-2, tolerance=1e-5, max_patience=5):
