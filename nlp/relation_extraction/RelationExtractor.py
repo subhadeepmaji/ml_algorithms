@@ -90,7 +90,11 @@ class RelationExtractor:
 
             # work with ascii string only
             sentence = "".join((c for c in sentence if 0 < ord(c) < 127))
-            senna_annotation = self.relation_annotator.getAnnotations(sentence)
+            try:
+                senna_annotation = self.relation_annotator.getAnnotations(sentence)
+            except Exception as e:
+                logger.error(e)
+                continue
 
             chunk_parse, pos_tags, role_labeling, tokenized_sentence = \
                 senna_annotation['chunk'], senna_annotation['pos'], senna_annotation['srl'], \
@@ -131,7 +135,7 @@ class RelationExtractor:
                     if not en0 or not en1: continue
                     relations.append(RelationTuple(left_entity=en0, right_entity=en1, relation=verb,
                                                    sentence=sentence, text=text, block_id=block_id,
-                                                   payload=payload))
+                                                   payload=payload, ff=ff))
                     logger.info("generated a relation for ")
                     logger.info(block_id)
 

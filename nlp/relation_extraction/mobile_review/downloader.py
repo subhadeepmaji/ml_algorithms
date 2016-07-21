@@ -8,7 +8,7 @@ from collections import namedtuple
 
 from spacy import English
 from elasticsearch_dsl.connections import connections
-from elasticsearch_dsl.query import Q
+from elasticsearch_dsl.query import Q, Match
 
 from nlp.relation_extraction.data_source.models import ReviewArticle
 from nlp.relation_extraction.data_sink.models import ReviewRelation
@@ -79,10 +79,9 @@ class GSMArenaDownloader:
         wait(write_tasks, return_when=ALL_COMPLETED)
 
 
-
 class QueryResolver:
 
-    def __init__(self, num_results=3):
+    def __init__(self, num_results=5):
         self.num_results = num_results
         self.inited_engine = False
 
@@ -101,9 +100,12 @@ class QueryResolver:
         entity_query = list(relation_query.nouns)
         entity_query.extend(relation_query.np_chunks)
 
+        if not entity_query: entity_query = ""
+        verb_query = "" if not relation_query.verbs else relation_query.verbs
+
         query = Q('bool', should=[Q('multi_match', query=entity_query,
-                                    fields=['leftEntity', 'rightEntity']),
-                                  Q('match', relation=relation_query.verbs)])
+                                    fields=['leftEntity', 'rightEntity'], boost=3),
+                                  Match(relation={"query" : verb_query})])
 
         s = search_engine.query(query)
         return s
@@ -115,17 +117,28 @@ class QueryResolver:
 
         noun_tokens, verb_tokens, noun_chunks = [], [], []
         for query_token in nlp_query:
+            print query_token, query_token.pos_
             if query_token.pos_ == 'NOUN':
-                noun_tokens.append(query_token)
+                noun_tokens.append(query_token.text)
             if query_token.pos_ == 'VERB':
-                noun_tokens.append(query_token)
+                verb_tokens.append(query_token.text)
 
         for np_chunk in nlp_query.noun_chunks:
-            noun_chunks.append(np_chunk)
+            noun_chunks.append(np_chunk.text)
 
         query = self.form_relation_query(RelationQuery(nouns=noun_tokens, verbs=verb_tokens,
                                                        np_chunks=noun_chunks))
+        response = query.execute()
+        for doc in response[:self.num_results]:
+            print "----------------------------------"
 
-        return query.execute()
+            print "product name :: ", doc.productName
+            print "entity :: ", doc.leftEntity, doc.rightEntity
+            print "relation :: ", doc.relation
+            print "sentence :: ", doc.sentence
+
+            print "----------------------------------"
+
+
 
 
