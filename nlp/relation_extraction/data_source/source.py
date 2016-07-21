@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 PY_FILE_REGEX = re.compile(".*\.py$")
 ModelIdentifier = namedtuple('ModelIdentifier', ['db_name', 'db_alias', 'collection_name',
-                                                 'fields', 'model_class'])
+                                                 'fields', 'payload_fields', 'function_fields',
+                                                 'model_class'])
 
 
 class SourceLoader:
@@ -43,6 +44,8 @@ class SourceLoader:
                 self.models.append(ModelIdentifier(db_name=module.db_name, db_alias=module.db_alias,
                                                    collection_name=module.collection_name,
                                                    fields=module.relation_fields,
+                                                   payload_fields = module.payload_fields,
+                                                   function_fields = module.function_fields,
                                                    model_class=module.model_class))
             except (ImportError, Exception) as e:
                 raise RuntimeError("Error importing the module ", e)
@@ -97,6 +100,20 @@ class MongoDataSource:
                 if field_value[-1] not in ['.', '?']:
                     field_value += '.'
                 data_field_values.append((f, field_value))
+
+            if self.model_identifier.payload_fields:
+                for f in self.model_identifier.payload_fields:
+                    field_value = item[f]
+                    data_field_values.append(("payload", field_value))
+
+            if self.model_identifier.function_fields:
+                for f in self.model_identifier.function_fields:
+                    field_value = item[f]
+                    field_value = field_value.split(" ")
+                    i = [index for index, e in enumerate(field_value) if e.find(":") != -1]
+                    if i and i[0] != -1:
+                        field_value = " ".join(field_value[:i[0]])
+                        data_field_values.append(("ff", field_value))
 
             return tuple(data_field_values)
 

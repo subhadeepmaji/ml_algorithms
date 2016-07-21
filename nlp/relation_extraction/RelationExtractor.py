@@ -74,7 +74,7 @@ class RelationExtractor:
                                 EXT=semantic_element.get('AM-EXT'), PNC=semantic_element.get('AM-PNC'),
                                 CAU=semantic_element.get('AM-CAU'), NEG=semantic_element.get('AM-NEG'))
 
-    def form_relations(self, text, block_id, persist=True):
+    def form_relations(self, text, block_id, payload, ff, persist=True):
         """
         form relation(s) on a given text
         :param text: text on which to get the relations on,
@@ -112,12 +112,17 @@ class RelationExtractor:
                                               in enumerate(arguments) if i < j)]
 
                 verb = relation_util.normalize_relation(verb)
+
                 for a0, a1 in argument_pairs:
                     en0 = relation_util.form_entity(tokenized_sentence, a0, chunk_parse, pos_tags)
                     en1 = relation_util.form_entity(tokenized_sentence, a1, chunk_parse, pos_tags)
                     if not en0 or not en1: continue
                     relations.append(RelationTuple(left_entity=en0, right_entity=en1, relation=verb,
-                                                   sentence=sentence, text=text, block_id=block_id))
+                                                   sentence=sentence, text=text, block_id=block_id,
+                                                   payload=payload, ff = ff))
+                    logger.info("generated a relation for ")
+                    logger.info(block_id)
+
                 for arg_modifier in modifiers:
                     mod_pos = sentence.find(arg_modifier)
                     linked_arg = min([(a, abs(mod_pos - sentence.find(a))) for a in arguments], key=lambda e: e[1])[0]
@@ -125,7 +130,10 @@ class RelationExtractor:
                     en1 = relation_util.form_entity(tokenized_sentence, arg_modifier, chunk_parse, pos_tags)
                     if not en0 or not en1: continue
                     relations.append(RelationTuple(left_entity=en0, right_entity=en1, relation=verb,
-                                                   sentence=sentence, text=text, block_id=block_id))
+                                                   sentence=sentence, text=text, block_id=block_id,
+                                                   payload=payload))
+                    logger.info("generated a relation for ")
+                    logger.info(block_id)
 
         return relations
 
@@ -135,13 +143,21 @@ class RelationExtractor:
             return
 
         item_entry = ""
+        payload = ""
+        ff = ""
+
         for f_name, f_value in source_item:
-            item_entry += f_value
+            if f_name == "payload":
+                payload = f_value
+            elif f_name == "ff":
+                ff = f_value
+            else:
+                item_entry += f_value
 
         if item_entry == ' ': return
         try:
             block_id = str(uuid.uuid1())
-            relations = self.form_relations(item_entry, block_id)
+            relations = self.form_relations(item_entry, block_id, payload, ff)
         except RuntimeError as e:
             logger.error("Error generating relations")
             logger.error(e)
@@ -155,6 +171,9 @@ class RelationExtractor:
             sink_relation.sentence = relation.sentence
             sink_relation.text = relation.text
             sink_relation.block_id = relation.block_id
+            sink_relation.productName = relation.ff
+            sink_relation.webLocation = relation.payload
+
             logger.info("generated a relation")
             logger.info(sink_relation)
 

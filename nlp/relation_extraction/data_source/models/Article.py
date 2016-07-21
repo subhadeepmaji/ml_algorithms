@@ -11,6 +11,9 @@ field_weights = {
     'title': 1
 }
 
+function_fields  = None
+payload_fields = None
+
 
 class Article(Document):
     title = StringField(required=True)

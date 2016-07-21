@@ -1,18 +1,19 @@
 from mongoengine import Document
 from mongoengine import StringField
 
-db_name = 'news'
-db_alias = 'news'
-collection_name = 'news_article'
+db_name = 'reviews'
+db_alias = 'reviews'
+collection_name = 'phone_reviews'
 relation_fields = ['text']
-function_fields  = None
-payload_fields = None
+function_fields  = ['title']
+payload_fields = ['url']
 
 
-class NewsArticle(Document):
-    source = StringField(required=True)
+class ReviewArticle(Document):
+    url = StringField(required=True)
     title = StringField(required=True)
     text = StringField(required=True)
+    productName = StringField(required=True)
 
     meta = {
         'db_alias' : db_alias,
@@ -20,5 +21,4 @@ class NewsArticle(Document):
         'strict' : False
     }
 
-model_class = NewsArticle
-
+model_class = ReviewArticle

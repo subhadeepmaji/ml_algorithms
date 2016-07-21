@@ -11,6 +11,9 @@ field_weights = {
     'question': 1
 }
 
+function_fields  = None
+payload_fields = None
+
 
 class FaqArticle(Document):
     question = StringField(required=True)

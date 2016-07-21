@@ -19,7 +19,7 @@ from nlp.understand_query import QueryTiler as QT
 from nlp.relation_extraction import RelationEmbedding as RE
 from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.cluster import spectral_clustering
+from sklearn.cluster import AffinityPropagation
 
 from joblib import Parallel, delayed
 from joblib import load, dump
@@ -245,11 +245,12 @@ class WordMoverModelRelation:
                                                             relation.right_entity))
             self.doc_text[relation.block_id] = relation.text
 
-    def cluster_relations(self, affinity_matrix=None, num_clusters=10):
+    def cluster_relations(self, affinity_matrix=None):
 
-        labels = spectral_clustering(affinity=affinity_matrix, n_clusters=num_clusters)
+        clustering_model = AffinityPropagation(affinity='precomputed', verbose=True, damping=0.6)
+        clustering_model.fit(affinity_matrix)
         clustering_labels = zip([(e.left_entity, e.relation, e.right_entity) for e
-                                 in self.relation_embedding.kb_triples], labels)
+                                 in self.relation_embedding.kb_triples], clustering_model.labels_)
         self.clusters = defaultdict(list)
         self.labeling = {}
 
@@ -257,6 +258,7 @@ class WordMoverModelRelation:
             self.clusters[label].append((index, triple))
             self.labeling[triple] = label
 
+        num_clusters = len(self.clusters)
         cluster_affinity = np.ndarray(shape=(num_clusters, num_clusters))
         for label_i, label_j in product(*[self.clusters.keys(), self.clusters.keys()]):
             triples_i = self.clusters[label_i]
@@ -266,62 +268,80 @@ class WordMoverModelRelation:
 
         self.cluster_representative = {}
         for label, triples in self.clusters.items():
+            '''
             triples_indices = [t[0] for t in triples]
             cluster_triple_affinity = affinity_matrix[triples_indices]
             cluster_triple_affinity = cluster_triple_affinity[:, [triples_indices]]
             representative = np.argmax(cluster_triple_affinity.sum(axis=0))
-            self.cluster_representative[label] = self.relation_embedding.kb_triples[triples_indices[representative]]
+            '''
+            self.cluster_representative[label] = self.relation_embedding.kb_triples\
+                [clustering_model.cluster_centers_indices_[label]]
 
         self.clusters_by_doc = {}
         for block_id, doc_relations in self.relation_by_doc.iteritems():
             doc_clusters = set([self.labeling[rel] for rel in doc_relations if rel in self.labeling])
             self.clusters_by_doc[block_id] = doc_clusters
 
-    def compute_word_mover(self, query, query_affinity, entity, relation_normal):
+    def compute_word_mover(self, query, query_affinity, entity, relation_normal, relation):
         block_id, query_relations, block_relations = query
 
         kernel_densities = np.array([[self.relation_embedding.kernel_density_pair(
-            (query_relation, block_relation), relation_normal=relation_normal, entity=entity, mmaped = True)[2]
-        for block_relation in block_relations] for query_relation in query_relations])
-        label_assignment = np.argmax(kernel_densities, axis=1)
-        affinity = np.sum([query_affinity[i][self.labeling[block_relations[l]]][2]
-                           for i,l in enumerate(label_assignment) if self.labeling.has_key(block_relations[l])])
+            (query_relation, block_relation), relation_normal=relation_normal, entity=entity,
+            relation=relation, mmaped = True) for block_relation in block_relations]
+                                     for query_relation in query_relations])
+
+        label_assignment = np.argmin(kernel_densities, axis=1)
+        affinity = np.sum([query_affinity[i][self.labeling[block_relations[l]]][1]
+                           for i,l in enumerate(label_assignment) if self.labeling
+                          .has_key(block_relations[l])])
 
         label_assignment = [(index, l) for index, l in enumerate(label_assignment)]
         densities = [kernel_densities[(i, e)] for i, e in label_assignment]
 
-        return block_id, 0.6 * np.sum(densities) + 0.4 * affinity
+        return block_id, 1 * np.sum(densities) + 0 * affinity
 
     def memorymap_model_arrays(self):
         persist_folder= tempfile.mkdtemp()
         entity = self.relation_embedding.Entity.get_value()
         relation_normal = self.relation_embedding.RelationNormal.get_value()
+        relation = self.relation_embedding.Relation.get_value()
 
         self.file_entity = os.path.join(persist_folder, "entity")
         self.file_relation_normal = os.path.join(persist_folder, "relation_normal")
+        self.file_relation = os.path.join(persist_folder, "relation")
 
         dump(entity, self.file_entity)
         dump(relation_normal, self.file_relation_normal)
+        dump(relation, self.file_relation)
 
     def compute_nearest_docs(self, query, topn=10):
         t1 = time.time()
         query_affinity = []
+
+        entity = load(self.file_entity, mmap_mode="r")
+        relation_normal = load(self.file_relation_normal, mmap_mode="r")
+        relation = load(self.file_relation, mmap_mode="r")
+
         for query_triple in query:
             candidates = [(query_triple, (n.left_entity, n.relation, n.right_entity))
                           for n in self.cluster_representative.values()]
-            affinity = map(self.relation_embedding.kernel_density_pair, candidates)
+
+            affinity = [(candidate, self.relation_embedding.kernel_density_pair
+                        (candidate, relation_normal=relation_normal,
+                         entity=entity, relation=relation)) for candidate in candidates]
+
             affinity = {c : e for c, e in enumerate(affinity)}
             query_affinity.append(affinity)
 
+        print query_affinity
         candidates = [(block_id, query, block_relations) for block_id, block_relations
                       in self.relation_by_doc.iteritems()]
-        entity = load(self.file_entity, mmap_mode="r")
-        relation_normal = load(self.file_relation_normal, mmap_mode="r")
+
         density_by_doc = self.parallel_pool(delayed(func)(self, candidate, query_affinity,
-                                                          entity, relation_normal)
+                                                          entity, relation_normal, relation)
                                             for candidate in candidates)
 
-        density_by_doc = sorted(density_by_doc, key=lambda e: -e[1])[:topn]
+        density_by_doc = sorted(density_by_doc, key=lambda e: e[1])[:topn]
         nearest_docs = [(block_id, score, self.doc_text[block_id]) for block_id, score in density_by_doc]
         t2 = time.time()
         print t2 -t1, " seconds"

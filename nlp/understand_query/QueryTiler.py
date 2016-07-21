@@ -14,6 +14,9 @@ class QueryTiler:
     def __tile_single_token(self, token):
         words = self.embedding.get_tags_for_word(token)
         words_single_sense = [w for w in words if w.split("|")[1] in self.embedding.senses]
+        if token +"|NOUN" in words_single_sense:
+            return token + "|NOUN"
+
         labels = [(w, self.embedding.model.most_similar(w, topn=1)[0][1]) for w in words_single_sense]
         if not labels: return None
         return max(labels, key=lambda e: e[1])[0]
@@ -68,7 +71,6 @@ class QueryTiler:
                     best_label = phrase_tag if max_likelihood == tiling_likelihood else best_label
                     best_index = j - 1 if max_likelihood == tiling_likelihood else best_index
 
-            print best_index, best_label
             if best_index is not None:
                 tiling_sequence[index] = list(tiling_sequence[best_index]) \
                     if best_index >= 0 else list()
@@ -78,5 +80,4 @@ class QueryTiler:
             tiling_sequence[index].append(best_label)
             tiling_cost[index] = max_likelihood
 
-        print tiling_sequence
         return tiling_sequence[-1], non_model_query_tokens

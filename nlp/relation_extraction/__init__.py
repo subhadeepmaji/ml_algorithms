@@ -18,7 +18,7 @@ JOB_LIB_TEMP_FOLDER = '.'
 
 # Named tuple definitions of semantic role labeling
 RelationTuple = namedtuple("RelationTuple", ['left_entity', 'right_entity', 'relation', 'sentence', 'text',
-                                             'block_id'])
+                                             'payload', 'block_id', 'ff'])
 
 RelationArgument = namedtuple('RelationArgument', ['A0', 'A1', 'A2', 'A3'])
 RelationModifier = namedtuple('RelationModifier', ['DIR', 'LOC', 'TMP', 'MNR', 'EXT', 'PNC', 'CAU', 'NEG'])

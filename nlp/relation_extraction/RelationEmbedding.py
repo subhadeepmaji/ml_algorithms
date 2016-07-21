@@ -857,7 +857,8 @@ class TransHEmbedding:
         candidates = sorted(candidates, key=lambda e: e[1])
         return candidates[:topn]
 
-    def kernel_density_estimate(self, x, relation_normal=None, relation=None, entity=None, mmaped=False):
+    def kernel_density_estimate(self, x, relation_normal=None, relation=None,
+                                entity=None, mmaped=False):
         """
         compute the kernel density estimate for a triple
         :param xi: (l, r, h) of the relation triple
@@ -885,7 +886,7 @@ class TransHEmbedding:
         h_plane = h - (np.dot(r_normal, h) * r_normal)
         return x, np.linalg.norm(l_plane + r - h_plane)
 
-    def kernel_density_pair(self, x_pair, std = 1, relation_normal=None,
+    def kernel_density_pair(self, x_pair, std = 1, relation_normal=None, relation=None,
                             entity=None, mmaped=False):
         """
         compute the kernel density metric distance between the relation triples
@@ -898,61 +899,32 @@ class TransHEmbedding:
         :return: kernel density distance between the two triples
         """
         xi, xj = x_pair
-        (le_i, rel_i, re_i) = xi
-        (le_j, rel_j, re_j) = xj
+        (l1, r1, h1) = xi
+        (l2, r2, h2) = xj
 
-        try:
-            (li_index, ri_index, hi_index) = self.entity_indices[le_i], self.relation_indices[rel_i], \
-                                             self.entity_indices[re_i]
-            (lj_index, rj_index, hj_index) = self.entity_indices[le_j], self.relation_indices[rel_j], \
-                                         self.entity_indices[re_j]
-        except KeyError, e:
-            return xi, xj, 0
+        query_triples = [(l1, r1, h2), (l2, r1, h1), (l1, r2, h1),
+                         (l2, r2, h1), (l1, r2, h2), (l2, r1, h2)]
+        return np.average([self.kernel_density_estimate(triple, relation_normal=relation_normal,
+                                                        relation=relation, entity=entity,
+                                                        mmaped=True)[1]
+                           for triple in query_triples])
 
-        if mmaped:
-            li, lj = entity[:, li_index], entity[:, lj_index]
-            hi, hj = entity[:, hi_index], entity[:, hj_index]
-        else:
-            li = self.Entity.get_value()[:, li_index]
-            lj = self.Entity.get_value()[:, lj_index]
-            hi = self.Entity.get_value()[:, hi_index]
-            hj = self.Entity.get_value()[:, hj_index]
-
-        if mmaped:
-            ri_normal = relation_normal[:, ri_index]
-            rj_normal = relation_normal[:, rj_index]
-        else:
-            ri_normal = self.RelationNormal.get_value()[:,ri_index]
-            rj_normal = self.RelationNormal.get_value()[:, rj_index]
-
-        li_plane = li - (np.dot(ri_normal, li) * ri_normal)
-        lj_plane = lj - (np.dot(rj_normal, lj) * rj_normal)
-        hi_plane = hi - (np.dot(ri_normal, hi) * ri_normal)
-        hj_plane = hj - (np.dot(rj_normal, hj) * rj_normal)
-
-        relation_norm_factor = self.relation_norm_factor[rel_i]
-        entity_density_estimate = sp.spatial.distance.cosine(li_plane,lj_plane) \
-                                  + sp.spatial.distance.cosine(hi_plane,hj_plane)
-
-        relation_density_estimate = sp.spatial.distance.cosine(ri_normal, rj_normal)
-        density_estimate = relation_norm_factor * relation_density_estimate + entity_density_estimate
-
-        return xi, xj, np.exp(-entity_density_estimate / 2 * (std ** 2)) / (2 * np.pi * std)
-
-    def compute_affinity(self):
+    def compute_distance_matrix(self):
         triples = (((ti.left_entity, ti.relation, ti.right_entity), (tj.left_entity, tj.relation, tj.right_entity))
                    for ti,tj in product(*[self.kb_triples, self.kb_triples]))
 
         entity = load(self.file_entity, mmap_mode="r")
         relation_normal = load(self.file_relation_normal, mmap_mode="r")
+        relation = load(self.file_relation, mmap_mode="r")
 
-        affinity = self.parallel_pool(delayed(kernel_density_pair)
+        distances = self.parallel_pool(delayed(kernel_density_pair)
                                        (self, pair, relation_normal=relation_normal,
-                                        entity=entity, mmaped=True)
+                                        relation=relation, entity=entity, mmaped=True)
                                        for pair in triples)
 
-        affinity = np.array([a[2] for a in affinity])
-        self.affinity_matrix = affinity.reshape(len(self.kb_triples), len(self.kb_triples))
+        self.distances = distances
+        distances = np.array(distances)
+        self.distance_matrix = distances.reshape(len(self.kb_triples), len(self.kb_triples))
 
     def memorymap_model_arrays(self):
         persist_folder = tempfile.mkdtemp()
@@ -974,7 +946,6 @@ class TransHEmbedding:
         relation_sim = np.ndarray(shape=(num_relations, num_relations))
         for (rel1, index1), (rel2, index2) in product(*[self.relation_indices.iteritems(),
                                                         self.relation_indices.iteritems()]):
-
             if index1 == index2:
                 relation_sim[index1][index2] = 0
                 continue
