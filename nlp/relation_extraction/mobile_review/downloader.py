@@ -12,6 +12,7 @@ from nltk.stem import PorterStemmer
 from nltk import word_tokenize
 from elasticsearch_dsl.connections import connections
 from elasticsearch_dsl.query import Q, Match
+from fuzzywuzzy import fuzz
 
 from collections import defaultdict
 from nlp.relation_extraction.data_source.models import ReviewArticle
@@ -143,6 +144,11 @@ class EntityNormalizer:
             concept_similarity = [c[0] for c in concept_similarity][:topn]
             self.concept_similarity[concept.text] = concept_similarity
 
+    def get_similar_products(self, product_name):
+        products = set([kb_triple.payload for kb_triple in self.kb_triples])
+        best_matches = [(p, fuzz.ratio(product_name, p)) for p in products]
+        best_matches = sorted(best_matches, key=lambda e: -e[1])[:2]
+        return [m[0] for m in best_matches]
 
     def most_similar(self, query, topn=10):
         nouns = list(query.nouns)
@@ -155,8 +161,14 @@ class EntityNormalizer:
         sim_nouns = []
         sim_verbs = []
 
-        entities  = self.entities[query.product]
-        relations = self.entities[query.product]
+        if query.product not in self.entities or \
+                        query.product not in self.relations:
+            products = self.get_similar_products(query.product)
+        else:
+            products = query.product
+
+        entities  = chain(*[self.entities[product] for product in products])
+        relations = chain(*[self.relations[product] for product in products])
 
         for noun in nouns:
             noun = self.nlp_engine(unicode(noun))
@@ -184,7 +196,8 @@ class EntityNormalizer:
                 close_entities = self.concept_similarity[attribute]
                 entity_closeness.extend(close_entities)
 
-        return  noun_similarity[:topn], verb_similarity[:topn], entity_closeness
+        return  noun_similarity[:topn], verb_similarity[:topn], \
+                entity_closeness, products
 
 
 class QueryResolver:
@@ -246,7 +259,7 @@ class QueryResolver:
                               np_chunks=noun_chunks, product=product,
                               attributes=attributes)
 
-        np, vp, close_concepts = self.entity_normalizer.most_similar(query)
+        np, vp, close_concepts, product = self.entity_normalizer.most_similar(query)
         query = RelationQuery(nouns = np, verbs = vp, np_chunks=[],
                               product=product, attributes=close_concepts)
 
