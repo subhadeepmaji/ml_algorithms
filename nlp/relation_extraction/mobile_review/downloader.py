@@ -5,6 +5,7 @@ from mongoengine import connect
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, Future
 from itertools import product
 from collections import namedtuple
+from itertools import chain
 
 from spacy import English
 from nltk.stem import PorterStemmer
@@ -132,7 +133,7 @@ class EntityNormalizer:
                 self.relation_text.add((product, rel.text))
 
     def form_similar_concepts(self, concepts, topn=10):
-        entities = self.entities.values()
+        entities = chain(*self.entities.values())
         for concept in concepts:
             concept = self.nlp_engine(unicode(concept))
             concept_similarity = [(entity, concept.similarity(entity)) for entity in entities]
@@ -140,7 +141,7 @@ class EntityNormalizer:
                                   if sim > self.sim_threshold]
             concept_similarity = sorted(concept_similarity, key=lambda e: -e[1])
             concept_similarity = [c[0] for c in concept_similarity][:topn]
-            self.concept_similarity[concept] = concept_similarity
+            self.concept_similarity[concept.text] = concept_similarity
 
 
     def most_similar(self, query, topn=10):
@@ -201,9 +202,6 @@ class QueryResolver:
         model_name = ReviewRelation.index + "." + ReviewRelation.mapping
         self.es_engine = connections.create_connection(model_name, hosts=[ELASTIC_HOST],
                                                        port=ELASTIC_PORT)
-
-        #self.entity_normalizer = EntityNormalizer(self.kb_triples, self.nlp_engine)
-        #self.entity_normalizer.normalize_entities()
         self.inited_engine = True
 
     def form_relation_query(self, relation_query):
