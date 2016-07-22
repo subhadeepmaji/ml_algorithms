@@ -78,7 +78,7 @@ class MongoDataSource:
 
     def start(self, query_filter=None):
         self.query_filter = query_filter
-        self.items = self.model_identifier.model_class.objects[5000:]
+        self.items = self.model_identifier.model_class.objects[9000:10000]
 
     def __iter__(self):
         return self

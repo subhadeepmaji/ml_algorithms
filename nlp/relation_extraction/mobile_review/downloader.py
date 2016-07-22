@@ -21,7 +21,8 @@ from nlp.relation_extraction.data_sink import ELASTIC_HOST, ELASTIC_PORT
 
 url_base = "http://www.gsmarena.com/abc-review-%dp%d.php"
 Review = namedtuple("Review", ["review_url", "review_title", "review_body"])
-RelationQuery = namedtuple("RelationQuery", ["nouns", "verbs", "np_chunks", "product"])
+RelationQuery = namedtuple("RelationQuery", ["nouns", "verbs", "np_chunks",
+                                             "product", "attributes"])
 
 
 class GSMArenaDownloader:
@@ -84,14 +85,15 @@ class GSMArenaDownloader:
 
 class EntityNormalizer:
 
-    def __init__(self, kb_triples, nlp_engine, sim_threshold=0.6,):
+    def __init__(self, kb_triples, sim_threshold=0.6):
         self.kb_triples = kb_triples
         self.entities = defaultdict(list)
         self.entities_text = set()
         self.relations = defaultdict(list)
         self.relation_text = set()
-        self.nlp_engine = nlp_engine
+        self.nlp_engine = English()
         self.stemmer = PorterStemmer()
+        self.concept_similarity = defaultdict(list)
         self.sim_threshold = sim_threshold
 
     def normalize_entities(self):
@@ -129,6 +131,18 @@ class EntityNormalizer:
                 self.relations[product].append(rel)
                 self.relation_text.add((product, rel.text))
 
+    def form_similar_concepts(self, concepts, topn=10):
+        entities = self.entities.values()
+        for concept in concepts:
+            concept = self.nlp_engine(unicode(concept))
+            concept_similarity = [(entity, concept.similarity(entity)) for entity in entities]
+            concept_similarity = [(entity.text, sim) for entity, sim in concept_similarity
+                                  if sim > self.sim_threshold]
+            concept_similarity = sorted(concept_similarity, key=lambda e: -e[1])
+            concept_similarity = [c[0] for c in concept_similarity][:topn]
+            self.concept_similarity[concept] = concept_similarity
+
+
     def most_similar(self, query, topn=10):
         nouns = list(query.nouns)
         nouns.append(query.np_chunks)
@@ -162,15 +176,23 @@ class EntityNormalizer:
 
         noun_similarity = [n[0] for n in noun_similarity]
         verb_similarity = [v[0] for v in verb_similarity]
-        return  noun_similarity[:topn], verb_similarity[:topn]
+
+        entity_closeness = []
+        if query.attributes:
+            for attribute in query.attributes:
+                close_entities = self.concept_similarity[attribute]
+                entity_closeness.extend(close_entities)
+
+        return  noun_similarity[:topn], verb_similarity[:topn], entity_closeness
 
 
 class QueryResolver:
 
-    def __init__(self, kb_triples, engine, num_results=5):
+    def __init__(self, kb_triples, entity_normalizer, num_results=5):
         self.num_results = num_results
         self.kb_triples = kb_triples
-        self.nlp_engine = engine
+        self.entity_normalizer = entity_normalizer
+        self.nlp_engine = entity_normalizer.nlp_engine
         self.inited_engine = False
 
     def init_engine(self):
@@ -180,8 +202,8 @@ class QueryResolver:
         self.es_engine = connections.create_connection(model_name, hosts=[ELASTIC_HOST],
                                                        port=ELASTIC_PORT)
 
-        self.entity_normalizer = EntityNormalizer(self.kb_triples, self.nlp_engine)
-        self.entity_normalizer.normalize_entities()
+        #self.entity_normalizer = EntityNormalizer(self.kb_triples, self.nlp_engine)
+        #self.entity_normalizer.normalize_entities()
         self.inited_engine = True
 
     def form_relation_query(self, relation_query):
@@ -189,6 +211,7 @@ class QueryResolver:
 
         entity_query = list(relation_query.nouns)
         entity_query.extend(relation_query.np_chunks)
+        entity_query.extend(relation_query.attributes)
 
         if not entity_query: entity_query = ""
         verb_query = "" if not relation_query.verbs else relation_query.verbs
@@ -205,7 +228,7 @@ class QueryResolver:
         s = search_engine.query(query)
         return s
 
-    def resolve(self, query, product):
+    def resolve(self, query, attributes, product):
         assert self.inited_engine, "Query engine must be inited to perform a query"
         query = unicode(query)
         nlp_query = self.nlp_engine(query)
@@ -222,10 +245,12 @@ class QueryResolver:
             noun_chunks.append(np_chunk.text)
 
         query = RelationQuery(nouns=noun_tokens, verbs=verb_tokens,
-                              np_chunks=noun_chunks, product=product)
+                              np_chunks=noun_chunks, product=product,
+                              attributes=attributes)
 
-        np, vp = self.entity_normalizer.most_similar(query)
-        query = RelationQuery(nouns = np, verbs = vp, np_chunks=[], product=product)
+        np, vp, close_concepts = self.entity_normalizer.most_similar(query)
+        query = RelationQuery(nouns = np, verbs = vp, np_chunks=[],
+                              product=product, attributes=close_concepts)
 
         query = self.form_relation_query(query)
         if not query: return None
